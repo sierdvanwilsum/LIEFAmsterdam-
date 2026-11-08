@@ -1,14 +1,14 @@
 "use strict";
 
-const GVB_EVENT_TEXT = "GVB organiseert een bedrijfsevent bij LIEF Amsterdam met Willy Wonka als thema. Bekijk de shiftbriefing en het draaiboek voor praktische informatie.";
+const GVB_EVENT_TEXT = "Bedrijfsfeest van GVB bij LIEF Amsterdam. Het thema is Willy Wonka. Praktische informatie staat in de shiftbriefing en het draaiboek.";
 const demoEvents = [
   ["Day 1 – Opbouw", "", "Opbouw", "2026-11-12", "Voorbereiding van het zakelijke event DAY1."],
   ["DAY1", "JayJay Boske", "Event", "2026-11-13", "Een inspirerende dag met presentaties, ontmoetingen en een afsluitend programma."],
-  ["GVB", "Willy Wonka", "Opbouw", "2026-12-08", "Opbouw voor het GVB-event met Willy Wonka als thema."],
-  ["GVB", "Willy Wonka", "Bedrijfsevent", "2026-12-09", GVB_EVENT_TEXT],
-  ["GVB", "Willy Wonka", "Bedrijfsevent", "2026-12-10", GVB_EVENT_TEXT],
-  ["GVB", "Willy Wonka", "Bedrijfsevent", "2026-12-11", GVB_EVENT_TEXT],
-  ["GVB", "Willy Wonka", "Bedrijfsevent", "2026-12-12", GVB_EVENT_TEXT],
+  ["GVB bedrijfsfeest – opbouwdag", "Thema: Willy Wonka", "Opbouw", "2026-12-08", "Opbouw voor het bedrijfsfeest van GVB met Willy Wonka als thema."],
+  ["GVB bedrijfsfeest", "Thema: Willy Wonka", "Bedrijfsfeest", "2026-12-09", GVB_EVENT_TEXT],
+  ["GVB bedrijfsfeest", "Thema: Willy Wonka", "Bedrijfsfeest", "2026-12-10", GVB_EVENT_TEXT],
+  ["GVB bedrijfsfeest", "Thema: Willy Wonka", "Bedrijfsfeest", "2026-12-11", GVB_EVENT_TEXT],
+  ["GVB bedrijfsfeest", "Thema: Willy Wonka", "Bedrijfsfeest", "2026-12-12", GVB_EVENT_TEXT],
   ["Oud en Opnieuw", "", "Bedrijfsevent", "2026-12-15", "Een feestelijke afsluiting van het jaar voor medewerkers en relaties."],
 ].map(([title, subtitle, type, start_date, description], index) => ({
   id: `event-${index + 1}`, title, subtitle, type, description,
@@ -74,7 +74,7 @@ function makeDemoData() {
   }));
   const documents = [
     { id: "doc-1", shift_id: shifts[1].id, event_id: shifts[1].event_id, title: "DAY1 – Draaiboek", file_type: "Draaiboek", mime_type: "text/plain", file_url: "", uploaded_by: "demo-manager", created_at: new Date().toISOString(), demo_text: "DAY1 – Draaiboek\nCrewbriefing 08:45\nOntvangst gasten 09:00\nAfsluiting 22:00" },
-    { id: "doc-2", shift_id: shifts[3].id, event_id: shifts[3].event_id, title: "GVB · Willy Wonka – Briefing", file_type: "Briefing", mime_type: "text/plain", file_url: "", uploaded_by: "demo-manager", created_at: new Date().toISOString(), demo_text: "GVB · Willy Wonka – Briefing\nCheck in bij de crewbalie.\nLees alle belangrijke mededelingen in de eventruimte." },
+    { id: "doc-2", shift_id: shifts[3].id, event_id: shifts[3].event_id, title: "GVB bedrijfsfeest – briefing", file_type: "Briefing", mime_type: "text/plain", file_url: "", uploaded_by: "demo-manager", created_at: new Date().toISOString(), demo_text: "GVB bedrijfsfeest – briefing\nThema: Willy Wonka.\nCheck in bij de crewbalie en lees de mededelingen in de eventruimte." },
   ];
   return { profiles, events, shifts, shift_roles, shift_signups, tasks, documents };
 }

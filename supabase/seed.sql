@@ -4,11 +4,11 @@
 insert into public.events (id, title, subtitle, type, description, location, start_date, end_date) values
 ('10000000-0000-4000-8000-000000000001', 'Day 1 – Opbouw', null, 'Opbouw', 'Voorbereiding van het zakelijke event DAY1.', 'LIEF Amsterdam', '2026-11-12', '2026-11-12'),
 ('10000000-0000-4000-8000-000000000002', 'DAY1', 'JayJay Boske', 'Event', 'Een inspirerende dag met presentaties, ontmoetingen en een afsluitend programma.', 'LIEF Amsterdam', '2026-11-13', '2026-11-13'),
-('10000000-0000-4000-8000-000000000003', 'GVB', 'Willy Wonka', 'Opbouw', 'Opbouw voor het GVB-event met Willy Wonka als thema.', 'LIEF Amsterdam', '2026-12-08', '2026-12-08'),
-('10000000-0000-4000-8000-000000000004', 'GVB', 'Willy Wonka', 'Bedrijfsevent', 'GVB organiseert een bedrijfsevent bij LIEF Amsterdam met Willy Wonka als thema. Bekijk de shiftbriefing en het draaiboek voor praktische informatie.', 'LIEF Amsterdam', '2026-12-09', '2026-12-09'),
-('10000000-0000-4000-8000-000000000005', 'GVB', 'Willy Wonka', 'Bedrijfsevent', 'GVB organiseert een bedrijfsevent bij LIEF Amsterdam met Willy Wonka als thema. Bekijk de shiftbriefing en het draaiboek voor praktische informatie.', 'LIEF Amsterdam', '2026-12-10', '2026-12-10'),
-('10000000-0000-4000-8000-000000000006', 'GVB', 'Willy Wonka', 'Bedrijfsevent', 'GVB organiseert een bedrijfsevent bij LIEF Amsterdam met Willy Wonka als thema. Bekijk de shiftbriefing en het draaiboek voor praktische informatie.', 'LIEF Amsterdam', '2026-12-11', '2026-12-11'),
-('10000000-0000-4000-8000-000000000007', 'GVB', 'Willy Wonka', 'Bedrijfsevent', 'GVB organiseert een bedrijfsevent bij LIEF Amsterdam met Willy Wonka als thema. Bekijk de shiftbriefing en het draaiboek voor praktische informatie.', 'LIEF Amsterdam', '2026-12-12', '2026-12-12'),
+('10000000-0000-4000-8000-000000000003', 'GVB bedrijfsfeest – opbouwdag', 'Thema: Willy Wonka', 'Opbouw', 'Opbouw voor het bedrijfsfeest van GVB met Willy Wonka als thema.', 'LIEF Amsterdam', '2026-12-08', '2026-12-08'),
+('10000000-0000-4000-8000-000000000004', 'GVB bedrijfsfeest', 'Thema: Willy Wonka', 'Bedrijfsfeest', 'Bedrijfsfeest van GVB bij LIEF Amsterdam. Het thema is Willy Wonka. Praktische informatie staat in de shiftbriefing en het draaiboek.', 'LIEF Amsterdam', '2026-12-09', '2026-12-09'),
+('10000000-0000-4000-8000-000000000005', 'GVB bedrijfsfeest', 'Thema: Willy Wonka', 'Bedrijfsfeest', 'Bedrijfsfeest van GVB bij LIEF Amsterdam. Het thema is Willy Wonka. Praktische informatie staat in de shiftbriefing en het draaiboek.', 'LIEF Amsterdam', '2026-12-10', '2026-12-10'),
+('10000000-0000-4000-8000-000000000006', 'GVB bedrijfsfeest', 'Thema: Willy Wonka', 'Bedrijfsfeest', 'Bedrijfsfeest van GVB bij LIEF Amsterdam. Het thema is Willy Wonka. Praktische informatie staat in de shiftbriefing en het draaiboek.', 'LIEF Amsterdam', '2026-12-11', '2026-12-11'),
+('10000000-0000-4000-8000-000000000007', 'GVB bedrijfsfeest', 'Thema: Willy Wonka', 'Bedrijfsfeest', 'Bedrijfsfeest van GVB bij LIEF Amsterdam. Het thema is Willy Wonka. Praktische informatie staat in de shiftbriefing en het draaiboek.', 'LIEF Amsterdam', '2026-12-12', '2026-12-12'),
 ('10000000-0000-4000-8000-000000000008', 'Oud en Opnieuw', null, 'Bedrijfsevent', 'Een feestelijke afsluiting van het jaar voor medewerkers en relaties.', 'LIEF Amsterdam', '2026-12-15', '2026-12-16')
 on conflict (id) do nothing;
 
