@@ -6,4 +6,4 @@ window.LIEF_SUPABASE = {
 };
 
 // Publieke sleutel voor browser-push; de privésleutel staat uitsluitend server-side.
-window.LIEF_VAPID_PUBLIC_KEY = "BJCocxxWCyINEiGUKPgeQ3FkbnHF2nmf8stEul2yRC77YLZ1xWlJfCyrGGf74lVryPqNqGShP1w0CEWgpYy2mOg";
+window.LIEF_VAPID_PUBLIC_KEY = "BOvVIoyS83lnYyaspS7Wdfazb6nAcybRHpIImwQKem2bor47tIi3T0XxD-C5RLjrLPN-dnHF8MPBWe_ia84hDvY";
