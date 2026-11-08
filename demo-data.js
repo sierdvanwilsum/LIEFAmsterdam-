@@ -39,7 +39,7 @@ function makeDemoData() {
   const shifts = demoShiftSpecs.map(([eventIndex, title, start_time, end_time, roles, briefing], index) => ({
     id: `shift-${index + 1}`, event_id: events[eventIndex].id, title,
     date: events[eventIndex].start_date, start_time, end_time,
-    required_people: roles.reduce((sum, [, need]) => sum + need, 0), briefing,
+    required_people: roles.reduce((sum, [, need]) => sum + need, 0), briefing, published: true,
     announcement: index === 1 ? "Neem je legitimatie mee voor de crewregistratie." : index === 3 ? "Crewbriefing om 08:45." : "",
   }));
   const shift_roles = demoShiftSpecs.flatMap(([, , , , roles], shiftIndex) => roles.map(([name, required_count], roleIndex) => ({

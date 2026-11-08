@@ -6,7 +6,46 @@ const configured = Boolean(supaConfig.url && supaConfig.publishableKey);
 const supa = configured && window.supabase ? window.supabase.createClient(supaConfig.url, supaConfig.publishableKey) : null;
 const roleNames = ["Bar", "Runner", "Debras", "Opbouw", "Afbouw", "Productie", "Garderobe", "Hospitality", "Oempa Loempa", "Routing", "Entertainment support", "Anders"];
 const documentTypes = ["Draaiboek", "Factsheet", "Plattegrond", "Briefing", "Overig"];
-const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: new URLSearchParams(location.search).get("auth") === "recovery" ? "reset" : "login", filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, roomChannel: null, roomChannelId: null, showEventForm: false };
+const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: new URLSearchParams(location.search).get("auth") === "recovery" ? "reset" : "login", filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, roomChannel: null, roomChannelId: null, showEventForm: false, notificationPreferences: null, notificationError: "", pushEnabled: false };
+const notificationChoices = [
+  ["new_tasks", "Nieuwe taken"], ["new_shifts", "Nieuwe shifts"],
+  ["shift_accepted", "Shift geaccepteerd"], ["shift_changed", "Shift gewijzigd"],
+  ["event_announcements", "Belangrijke eventmededelingen"], ["document_changed", "Document gewijzigd"],
+];
+const defaultNotificationPreferences = Object.fromEntries(notificationChoices.map(([key]) => [key, true]));
+function supportsPush() { return Boolean(supa && window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && window.LIEF_VAPID_PUBLIC_KEY); }
+function vapidBytes() { const value = window.LIEF_VAPID_PUBLIC_KEY.replace(/-/g, "+").replace(/_/g, "/"); return Uint8Array.from(atob(value.padEnd(Math.ceil(value.length / 4) * 4, "=")), c => c.charCodeAt(0)); }
+async function pushRegistration() {
+  await navigator.serviceWorker.register("./sw.js");
+  return Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Service worker kon niet starten.")), 8000)),
+  ]);
+}
+async function pushAction(action, payload = {}) {
+  const result = await supa.functions.invoke("push", { body: { action, ...payload } });
+  if (result.error || result.data?.error) throw new Error(result.data?.error || "Pushdienst is nog niet ingericht. Controleer de Edge Function.");
+  return result.data;
+}
+async function loadNotificationSettings() {
+  state.notificationError = "";
+  state.notificationPreferences = null;
+  if (!supa || !state.user) return;
+  const result = await supa.from("notification_preferences").select("*").eq("user_id", state.user.id).maybeSingle();
+  if (result.error) state.notificationError = "Meldingen zijn nog niet ingericht. Voer notifications.sql uit in Supabase.";
+  else state.notificationPreferences = result.data || { user_id: state.user.id, ...defaultNotificationPreferences };
+  if (supportsPush() && Notification.permission === "granted") {
+    try {
+      const subscription = await (await pushRegistration()).pushManager.getSubscription();
+      state.pushEnabled = Boolean(subscription);
+      if (subscription) await pushAction("subscribe", { subscription: subscription.toJSON() });
+    } catch (error) {
+      console.error(error);
+      state.pushEnabled = false;
+      state.notificationError ||= "Pushmeldingen zijn nog niet beschikbaar. Controleer de Edge Function.";
+    }
+  } else state.pushEnabled = false;
+}
 
 function appUrl() { return `${location.origin}${location.pathname}`; }
 function resetUrl() { return `${appUrl()}?auth=recovery`; }
@@ -59,6 +98,7 @@ function assignedOf(id) { return state.data?.occupancy.find(item => item.shift_i
 function roleAssigned(id, name) { return state.data?.role_occupancy.find(item => item.shift_id === id && item.role_name === name)?.assigned_count || 0; }
 function openOf(shift) { return Math.max(0, shift.required_people - assignedOf(shift.id)); }
 function shiftStatus(shift) {
+  if (shift.published === false) return ["Concept", "pending"];
   const count = occupancyOf(shift.id);
   if (shift.required_people === 0) return ["Rollen ontbreken", "closed"];
   if (count >= shift.required_people && shift.required_people > 0) return ["Vol", "closed"];
@@ -67,7 +107,7 @@ function shiftStatus(shift) {
 }
 function canRoom(shiftId) { return isManager() || Boolean(mySignup(shiftId)?.available); }
 function orderedShifts() { return [...(state.data?.shifts || [])].sort((a, b) => `${a.date}T${a.start_time}`.localeCompare(`${b.date}T${b.start_time}`)); }
-function upcomingShifts() { const today = todayIso(); return orderedShifts().filter(shift => shift.date >= today); }
+function upcomingShifts() { const today = todayIso(); return orderedShifts().filter(shift => shift.date >= today && (isManager() || shift.published !== false)); }
 function badge(text, tone = "soft") { return `<span class="crew-badge ${tone}">${e(text)}</span>`; }
 function button(label, action, id = "", tone = "primary", extra = "") { return `<button type="button" class="crew-button ${tone}" data-action="${action}" ${id ? `data-id="${e(id)}"` : ""} ${extra}><span>${e(label)}</span><span class="crew-button-icon">${icon("arrow", 17)}</span></button>`; }
 function go(path) { const target = `#${path}`; if (location.hash === target) render(); else location.hash = target; window.scrollTo({ top: 0, behavior: "instant" }); }
@@ -79,7 +119,7 @@ function openSignup(id) {
   state.available = signup?.available ?? true;
   go(`signup/${id}`);
 }
-function currentRoute() { const [page = "home", id, tab] = location.hash.replace(/^#\/?/, "").split("/"); return { page: page || "home", id, tab }; }
+function currentRoute() { const [page = "home", id, tab, itemId] = location.hash.replace(/^#\/?/, "").split("/"); return { page: page || "home", id, tab, itemId }; }
 function toast(message) { state.toast = message; render(); }
 function getError(error) {
   if (error?.name === "Error" && error.message) return error.message;
@@ -129,6 +169,7 @@ async function bootstrap() {
   if (result.error) { root.innerHTML = `<div class="crew-gateway"><h1>Profiel ontbreekt</h1><p>Voer eerst schema.sql uit in Supabase en meld je opnieuw aan.</p><button class="crew-button secondary" data-action="logout" type="button">Uitloggen</button></div>`; return; }
   state.profile = result.data;
   await loadData();
+  await loadNotificationSettings();
   if (!location.hash && isManager()) go("manager");
   else render();
 }
@@ -204,19 +245,22 @@ function roomsPage() {
 }
 
 function profilePage() {
-  return shell(`${heading("JOUW GEGEVENS", "Profiel")}<div class="crew-profile-card"><div class="crew-profile-avatar">${e(firstName().slice(0, 1).toUpperCase())}</div><div><h2>${e(state.profile.full_name)}</h2>${badge(isManager() ? "Manager" : "Medewerker", isManager() ? "lime" : "soft")}</div></div><div class="crew-white-panel"><div class="crew-facts"><div><span>E-mailadres</span><strong>${e(state.user.email || "Demo-account")}</strong></div></div>${configured ? `<form class="crew-form" data-form="profile"><label>Volledige naam<input name="full_name" maxlength="100" value="${e(state.profile.full_name)}" required /></label><button class="crew-button primary" type="submit"><span>Naam opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form>` : ""}${button(configured ? "Uitloggen" : "Terug naar demo-keuze", "logout", "", "secondary")}</div>`, "profile");
+  const status = state.pushEnabled && window.Notification?.permission === "granted" ? "Meldingen staan aan" : "Meldingen staan uit";
+  const pushSupport = supportsPush();
+  const settings = configured ? `<section class="crew-white-panel crew-notifications"><div class="crew-section-head"><h2>Meldingen</h2>${badge(status, state.pushEnabled ? "confirmed" : "soft")}</div><p>Ontvang bericht over je shifts, taken en belangrijke eventinformatie.</p>${state.notificationError ? `<p class="crew-alert">${e(state.notificationError)}</p>` : ""}${pushSupport ? `${state.pushEnabled ? button("Meldingen uitschakelen", "disable-push", "", "secondary") : button("Meldingen inschakelen", "enable-push")}${state.pushEnabled ? button("Stuur testmelding", "test-push", "", "secondary") : ""}` : `<p class="crew-form-hint">Pushmeldingen worden op deze browser of dit apparaat niet ondersteund. Op iPhone werkt dit na toevoegen aan het beginscherm.</p>`}<div class="crew-notification-options">${notificationChoices.map(([key, label]) => `<label class="crew-notification-option"><span>${e(label)}</span><input type="checkbox" data-action="notification-preference" data-id="${key}" ${state.notificationPreferences?.[key] !== false ? "checked" : ""} ${!state.notificationPreferences ? "disabled" : ""} aria-label="${e(label)}" /></label>`).join("")}</div></section>` : `<section class="crew-white-panel crew-notifications"><h2>Meldingen</h2><p>Meldingen zijn beschikbaar zodra Supabase is aangesloten.</p></section>`;
+  return shell(`${heading("JOUW GEGEVENS", "Profiel")}<div class="crew-profile-card"><div class="crew-profile-avatar">${e(firstName().slice(0, 1).toUpperCase())}</div><div><h2>${e(state.profile.full_name)}</h2>${badge(isManager() ? "Manager" : "Medewerker", isManager() ? "lime" : "soft")}</div></div><div class="crew-white-panel crew-profile-details"><div class="crew-facts"><div><span>E-mailadres</span><strong>${e(state.user.email || "Demo-account")}</strong></div></div>${configured ? `<form class="crew-form" data-form="profile"><label>Volledige naam<input name="full_name" maxlength="100" value="${e(state.profile.full_name)}" required /></label><button class="crew-button primary" type="submit"><span>Naam opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form>` : ""}${button(configured ? "Uitloggen" : "Terug naar demo-keuze", "logout", "", "secondary")}</div>${settings}`, "profile");
 }
 
 function taskCard(task, compact = false) {
   const mine = task.assigned_to === state.user?.id;
   const detail = compact ? `<a class="crew-text-link" href="#room/${e(task.shift_id)}/taken">Bekijk taak ${icon("arrow", 15)}</a>` : `<div class="crew-task-actions">${!isManager() && !task.assigned_to && task.status !== "klaar" ? button("Claim taak", "claim-task", task.id) : ""}${!isManager() && mine && task.status === "te doen" ? button("Start taak", "start-task", task.id, "secondary") : ""}${!isManager() && mine && task.status !== "klaar" ? button("Afronden", "finish-task", task.id) : ""}${isManager() ? `<button type="button" class="crew-small-button" data-action="edit-task" data-id="${e(task.id)}">Wijzig</button><button type="button" class="crew-small-button danger" data-action="delete-task" data-id="${e(task.id)}">Verwijder</button>` : ""}</div>`;
-  return `<article class="crew-task-card priority-${e(task.priority)}"><div class="crew-task-top">${badge(task.priority === "urgent" ? "Urgent" : task.priority === "belangrijk" ? "Belangrijk" : "Normaal", task.priority)}${badge(task.status === "klaar" ? "Klaar" : task.status === "bezig" ? "Bezig" : "Te doen", task.status === "klaar" ? "confirmed" : "soft")}</div><h3>${e(task.title)}</h3>${!compact && task.description ? `<p>${e(task.description)}</p>` : ""}<div class="crew-task-assignee">${icon("user", 15)}${task.assigned_to ? `Toegewezen aan: <strong>${e(nameOf(task.assigned_to))}</strong>` : "Nog niet toegewezen"}</div>${!compact ? `<div class="crew-task-meta">Aangemaakt door ${e(nameOf(task.created_by))} · ${e(dateTimeText(task.created_at))}${task.completed_at ? ` · Afgerond ${e(dateTimeText(task.completed_at))}` : ""}</div>` : ""}${detail}</article>`;
+  return `<article id="task-${e(task.id)}" class="crew-task-card priority-${e(task.priority)}"><div class="crew-task-top">${badge(task.priority === "urgent" ? "Urgent" : task.priority === "belangrijk" ? "Belangrijk" : "Normaal", task.priority)}${badge(task.status === "klaar" ? "Klaar" : task.status === "bezig" ? "Bezig" : "Te doen", task.status === "klaar" ? "confirmed" : "soft")}</div><h3>${e(task.title)}</h3>${!compact && task.description ? `<p>${e(task.description)}</p>` : ""}<div class="crew-task-assignee">${icon("user", 15)}${task.assigned_to ? `Toegewezen aan: <strong>${e(nameOf(task.assigned_to))}</strong>` : "Nog niet toegewezen"}</div>${!compact ? `<div class="crew-task-meta">Aangemaakt door ${e(nameOf(task.created_by))} · ${e(dateTimeText(task.created_at))}${task.completed_at ? ` · Afgerond ${e(dateTimeText(task.completed_at))}` : ""}</div>` : ""}${detail}</article>`;
 }
 
 function taskForm(shiftId) {
   const task = state.editTask ? state.data.tasks.find(item => item.id === state.editTask) : null;
   const people = signupsOf(shiftId);
-  return `<form class="crew-task-form crew-white-panel" data-form="task" data-id="${e(shiftId)}" ${task ? `data-task="${e(task.id)}"` : ""}><div class="crew-section-head"><h2>${task ? "Taak wijzigen" : "Nieuwe taak"}</h2>${task ? `<button type="button" class="crew-small-button" data-action="cancel-edit">Annuleren</button>` : ""}</div><div class="crew-form"><label>Titel<input name="title" required maxlength="120" value="${e(task?.title || "")}" placeholder="Wat moet er gebeuren?" /></label><label>Omschrijving<textarea name="description" rows="3" maxlength="1000" placeholder="Praktische details">${e(task?.description || "")}</textarea></label><div class="crew-form-pair"><label>Prioriteit<select name="priority">${["normaal", "belangrijk", "urgent"].map(x => `<option value="${x}" ${task?.priority === x ? "selected" : ""}>${x[0].toUpperCase() + x.slice(1)}</option>`).join("")}</select></label><label>Status<select name="status">${["te doen", "bezig", "klaar"].map(x => `<option value="${x}" ${task?.status === x ? "selected" : ""}>${x[0].toUpperCase() + x.slice(1)}</option>`).join("")}</select></label></div><label>Toewijzen aan<select name="assigned_to"><option value="">Nog niet toegewezen</option>${people.map(x => `<option value="${e(x.user_id)}" ${task?.assigned_to === x.user_id ? "selected" : ""}>${e(nameOf(x.user_id))}</option>`).join("")}</select></label><button type="submit" class="crew-button primary"><span>${task ? "Wijzigingen opslaan" : "Taak toevoegen"}</span><span class="crew-button-icon">${icon("plus", 17)}</span></button></div></form>`;
+  return `<form class="crew-task-form crew-white-panel" data-form="task" data-id="${e(shiftId)}" ${task ? `data-task="${e(task.id)}"` : ""}><div class="crew-section-head"><h2>${task ? "Taak wijzigen" : "Nieuwe taak"}</h2>${task ? `<button type="button" class="crew-small-button" data-action="cancel-edit">Annuleren</button>` : ""}</div><div class="crew-form"><label>Titel<input name="title" required maxlength="120" value="${e(task?.title || "")}" placeholder="Wat moet er gebeuren?" /></label><label>Omschrijving<textarea name="description" rows="3" maxlength="1000" placeholder="Praktische details">${e(task?.description || "")}</textarea></label><div class="crew-form-pair"><label>Prioriteit<select name="priority">${["normaal", "belangrijk", "urgent"].map(x => `<option value="${x}" ${task?.priority === x ? "selected" : ""}>${x[0].toUpperCase() + x.slice(1)}</option>`).join("")}</select></label><label>Status<select name="status">${["te doen", "bezig", "klaar"].map(x => `<option value="${x}" ${task?.status === x ? "selected" : ""}>${x[0].toUpperCase() + x.slice(1)}</option>`).join("")}</select></label></div><label>Toewijzen aan<select name="assigned_to"><option value="">Nog niet toegewezen</option>${people.map(x => `<option value="${e(x.user_id)}" ${task?.assigned_to === x.user_id ? "selected" : ""}>${e(nameOf(x.user_id))}</option>`).join("")}</select></label><label class="crew-broadcast-option"><input type="checkbox" name="notify_all" ${task?.notify_all ? "checked" : ""} /> Meld urgente taak aan alle crewleden van deze shift</label><button type="submit" class="crew-button primary"><span>${task ? "Wijzigingen opslaan" : "Taak toevoegen"}</span><span class="crew-button-icon">${icon("plus", 17)}</span></button></div></form>`;
 }
 
 function overviewTab(shift) {
@@ -266,7 +310,7 @@ function managerPage() {
 function shiftManagePanel(shift) {
   const members = signupsOf(shift.id);
   const event = eventOf(shift);
-  return `<article class="crew-white-panel crew-manage-shift" id="shift-${e(shift.id)}"><div class="crew-section-head"><div><span class="eyebrow">${e(dateText(shift.date))} · ${e(shiftTime(shift))}</span><h2>${e(shift.title)}</h2></div>${badge(`${assignedOf(shift.id)} / ${shift.required_people} ingepland`, openOf(shift) ? "open" : "confirmed")}</div><div class="crew-manage-metrics"><span>${occupancyOf(shift.id)} aangemeld</span><span>${openOf(shift)} posities open</span><span>${tasksOf(shift.id).filter(t => t.status !== "klaar").length} taken open</span><span>${docsOf(shift.id).length} documenten</span></div><details class="crew-edit-details"><summary>Shift en briefing bewerken</summary><form class="crew-form" data-form="shift-edit" data-id="${e(shift.id)}"><label>Shiftnaam<input name="title" required maxlength="80" value="${e(shift.title)}" /></label><label>Datum<input name="date" type="date" min="${e(event.start_date)}" max="${e(event.end_date)}" required value="${e(shift.date)}" /></label><div class="crew-form-pair"><label>Begintijd<input name="start_time" type="time" required value="${e(timeText(shift.start_time))}" /></label><label>Eindtijd<input name="end_time" type="time" required value="${e(timeText(shift.end_time))}" /></label></div><label>Briefing<textarea name="briefing" rows="3">${e(shift.briefing)}</textarea></label><label>Belangrijke mededeling<textarea name="announcement" rows="2">${e(shift.announcement)}</textarea></label><button type="submit" class="crew-button primary"><span>Shift opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form></details><div class="crew-role-table"><div class="crew-role-header"><strong>Rol</strong><strong>Bezet</strong><strong>Benodigd</strong></div>${rolesOf(shift.id).map(role => `<div class="crew-role-row"><span>${e(role.name)}</span><strong>${roleAssigned(shift.id, role.name)} / ${role.required_count}</strong><input type="number" min="${Math.max(1, roleAssigned(shift.id, role.name))}" max="99" value="${role.required_count}" data-action="role-need" data-id="${e(role.id)}" aria-label="Benodigd aantal ${e(role.name)}" /></div>`).join("")}</div><form class="crew-add-role" data-form="role" data-id="${e(shift.id)}"><label>Rol toevoegen<input name="name" list="role-suggestions" required maxlength="80" placeholder="Bijvoorbeeld Bar" /></label><label>Aantal<input name="required_count" type="number" min="1" max="99" value="1" required /></label><button type="submit" class="crew-small-button lime">${icon("plus", 17)} Toevoegen</button></form><div class="crew-manage-crew"><strong>Aangemelde crew</strong>${members.length ? members.map(x => `<div><span>${e(nameOf(x.user_id))} <small>· ${e(x.preferred_role || "geen voorkeur")}</small></span><select data-action="assign-role" data-id="${e(x.id)}" aria-label="Rol van ${e(nameOf(x.user_id))}"><option value="">Nog niet ingedeeld</option>${rolesOf(shift.id).map(role => `<option value="${e(role.name)}" ${x.assigned_role === role.name ? "selected" : ""} ${roleAssigned(shift.id, role.name) >= role.required_count && x.assigned_role !== role.name ? "disabled" : ""}>${e(role.name)}</option>`).join("")}</select></div>`).join("") : "<p>Nog geen aanmeldingen.</p>"}</div><a class="crew-button secondary" href="#room/${e(shift.id)}/overzicht"><span>Open eventruimte</span><span class="crew-button-icon">${icon("arrow", 17)}</span></a></article>`;
+  return `<article class="crew-white-panel crew-manage-shift" id="shift-${e(shift.id)}"><div class="crew-section-head"><div><span class="eyebrow">${e(dateText(shift.date))} · ${e(shiftTime(shift))}</span><h2>${e(shift.title)}</h2></div>${shift.published === false ? badge("Concept", "pending") : badge(`${assignedOf(shift.id)} / ${shift.required_people} ingepland`, openOf(shift) ? "open" : "confirmed")}</div><div class="crew-manage-metrics"><span>${occupancyOf(shift.id)} aangemeld</span><span>${openOf(shift)} posities open</span><span>${tasksOf(shift.id).filter(t => t.status !== "klaar").length} taken open</span><span>${docsOf(shift.id).length} documenten</span></div>${shift.published === false ? `<div class="crew-publish"><p>Deze shift is nog niet zichtbaar voor medewerkers. Voeg eerst rollen toe en publiceer daarna.</p>${button("Publiceer shift", "publish-shift", shift.id, "primary", rolesOf(shift.id).length ? "" : "disabled")}</div>` : ""}<details class="crew-edit-details"><summary>Shift en briefing bewerken</summary><form class="crew-form" data-form="shift-edit" data-id="${e(shift.id)}"><label>Shiftnaam<input name="title" required maxlength="80" value="${e(shift.title)}" /></label><label>Datum<input name="date" type="date" min="${e(event.start_date)}" max="${e(event.end_date)}" required value="${e(shift.date)}" /></label><div class="crew-form-pair"><label>Begintijd<input name="start_time" type="time" required value="${e(timeText(shift.start_time))}" /></label><label>Eindtijd<input name="end_time" type="time" required value="${e(timeText(shift.end_time))}" /></label></div><label>Briefing<textarea name="briefing" rows="3">${e(shift.briefing)}</textarea></label><label>Belangrijke mededeling<textarea name="announcement" rows="2">${e(shift.announcement)}</textarea></label><button type="submit" class="crew-button primary"><span>Shift opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form></details><div class="crew-role-table"><div class="crew-role-header"><strong>Rol</strong><strong>Bezet</strong><strong>Benodigd</strong></div>${rolesOf(shift.id).map(role => `<div class="crew-role-row"><span>${e(role.name)}</span><strong>${roleAssigned(shift.id, role.name)} / ${role.required_count}</strong><input type="number" min="${Math.max(1, roleAssigned(shift.id, role.name))}" max="99" value="${role.required_count}" data-action="role-need" data-id="${e(role.id)}" aria-label="Benodigd aantal ${e(role.name)}" /></div>`).join("")}</div><form class="crew-add-role" data-form="role" data-id="${e(shift.id)}"><label>Rol toevoegen<input name="name" list="role-suggestions" required maxlength="80" placeholder="Bijvoorbeeld Bar" /></label><label>Aantal<input name="required_count" type="number" min="1" max="99" value="1" required /></label><button type="submit" class="crew-small-button lime">${icon("plus", 17)} Toevoegen</button></form><div class="crew-manage-crew"><strong>Aangemelde crew</strong>${members.length ? members.map(x => `<div><span>${e(nameOf(x.user_id))} <small>· ${e(x.preferred_role || "geen voorkeur")}</small></span><select data-action="assign-role" data-id="${e(x.id)}" aria-label="Rol van ${e(nameOf(x.user_id))}"><option value="">Nog niet ingedeeld</option>${rolesOf(shift.id).map(role => `<option value="${e(role.name)}" ${x.assigned_role === role.name ? "selected" : ""} ${roleAssigned(shift.id, role.name) >= role.required_count && x.assigned_role !== role.name ? "disabled" : ""}>${e(role.name)}</option>`).join("")}</select></div>`).join("") : "<p>Nog geen aanmeldingen.</p>"}</div><a class="crew-button secondary" href="#room/${e(shift.id)}/overzicht"><span>Open eventruimte</span><span class="crew-button-icon">${icon("arrow", 17)}</span></a></article>`;
 }
 function manageEventPage(event) {
   const shifts = orderedShifts().filter(shift => shift.event_id === event.id);
@@ -276,7 +320,7 @@ function manageEventPage(event) {
 function render() {
   if (configured && state.authMode === "reset") { root.innerHTML = gateway(); return; }
   if (!state.profile || !state.data) { root.innerHTML = gateway(); return; }
-  const { page, id, tab } = currentRoute();
+  const { page, id, tab, itemId } = currentRoute();
   const shift = shiftOf(id), event = state.data.events.find(item => item.id === id);
   if (page === "signup" && shift && state.draftShift !== id) {
     const signup = mySignup(id);
@@ -297,6 +341,7 @@ function render() {
   else if (page === "manage" && event && isManager()) root.innerHTML = manageEventPage(event);
   else root.innerHTML = homePage();
   document.title = `${page === "room" ? "Eventruimte" : page === "manager" ? "Manager" : "Crew"} · LIEF Amsterdam`;
+  if (allowed && tab === "taken" && itemId) requestAnimationFrame(() => document.getElementById(`task-${itemId}`)?.scrollIntoView({ block: "center" }));
   state.toast = "";
   const roomId = allowed ? id : null;
   if (supa && state.roomChannelId !== roomId) {
@@ -352,6 +397,40 @@ root.addEventListener("click", event => {
   if (action === "room") go(`room/${id}/overzicht`);
   if (action === "manage-event") go(`manage/${id}`);
   if (action === "manage-shift") { const s = shiftOf(id); go(`manage/${s.event_id}`); setTimeout(() => document.getElementById(`shift-${id}`)?.scrollIntoView({ behavior: "smooth" }), 50); }
+  if (action === "publish-shift" && isManager()) run(async () => {
+    if (!rolesOf(id).length) throw new Error("Voeg eerst minimaal één rol toe.");
+    await updateRow("shifts", id, { published: true });
+    toast("Shift gepubliceerd. Medewerkers met Nieuwe shifts ingeschakeld krijgen een melding.");
+  });
+  if (action === "enable-push") run(async () => {
+    if (!supportsPush()) throw new Error("Meldingen worden op dit apparaat niet ondersteund.");
+    if (!state.notificationPreferences) throw new Error("Voer eerst notifications.sql uit in Supabase.");
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") { toast("Meldingen staan uit. Je kunt toestemming geven via je browserinstellingen."); return; }
+    const registration = await pushRegistration();
+    let subscription = await registration.pushManager.getSubscription();
+    const created = !subscription;
+    if (!subscription) subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidBytes() });
+    try { await pushAction("subscribe", { subscription: subscription.toJSON() }); }
+    catch (error) { if (created) await subscription.unsubscribe(); throw error; }
+    state.pushEnabled = true;
+    toast("Meldingen staan aan.");
+  });
+  if (action === "disable-push") run(async () => {
+    const subscription = await (await pushRegistration()).pushManager.getSubscription();
+    if (subscription) {
+      await pushAction("unsubscribe", { endpoint: subscription.endpoint });
+      await subscription.unsubscribe();
+    }
+    state.pushEnabled = false;
+    toast("Meldingen staan uit.");
+  });
+  if (action === "test-push") run(async () => {
+    const subscription = await (await pushRegistration()).pushManager.getSubscription();
+    if (!subscription) throw new Error("Schakel eerst meldingen in op dit apparaat.");
+    await pushAction("test", { endpoint: subscription.endpoint });
+    toast("Testmelding verstuurd.");
+  });
   if (action === "show-event-form") { state.showEventForm = true; render(); }
   if (action === "hide-event-form") { state.showEventForm = false; render(); }
   if (action === "cancel-edit") { state.editTask = null; render(); }
@@ -425,15 +504,31 @@ root.addEventListener("click", event => {
     toast("Document verwijderd.");
   });
   if (action === "logout") run(async () => {
+    if (supportsPush() && Notification.permission === "granted") {
+      const subscription = await (await pushRegistration()).pushManager.getSubscription();
+      if (subscription) {
+        try { await pushAction("unsubscribe", { endpoint: subscription.endpoint }); } catch (error) { console.error(error); }
+        await subscription.unsubscribe();
+      }
+    }
     if (supa) { const { error } = await supa.auth.signOut(); if (error) throw error; }
     if (state.roomChannel && supa) supa.removeChannel(state.roomChannel);
-    state.roomChannel = null; state.roomChannelId = null; state.user = null; state.profile = null; state.data = null; state.authMode = "login";
+    state.roomChannel = null; state.roomChannelId = null; state.user = null; state.profile = null; state.data = null; state.notificationPreferences = null; state.pushEnabled = false; state.authMode = "login";
     location.hash = ""; render();
   });
 });
 
 root.addEventListener("change", event => {
   const target = event.target, action = target.dataset.action;
+  if (action === "notification-preference" && supa) run(async () => {
+    const key = target.dataset.id;
+    if (!notificationChoices.some(([name]) => name === key)) return;
+    const update = { user_id: state.user.id, [key]: target.checked };
+    const result = await supa.from("notification_preferences").upsert(update, { onConflict: "user_id" });
+    if (result.error) { target.checked = !target.checked; throw result.error; }
+    state.notificationPreferences = { ...(state.notificationPreferences || defaultNotificationPreferences), ...update };
+    toast("Meldingsvoorkeur opgeslagen.");
+  });
   if (action === "first-role") { state.firstRole = target.value; if (state.secondRole === target.value) state.secondRole = ""; render(); }
   if (action === "second-role") { state.secondRole = target.value; }
   if (action === "assign-role" && isManager()) run(async () => {
@@ -520,8 +615,8 @@ root.addEventListener("submit", event => {
     toast("Eventinformatie opgeslagen.");
   });
   if (form.dataset.form === "shift" && isManager()) run(async () => {
-    await insertRow("shifts", { event_id: form.dataset.id, title: String(values.title).trim(), date: values.date, start_time: values.start_time, end_time: values.end_time, briefing: String(values.briefing).trim(), announcement: "", required_people: 0 });
-    toast("Shift toegevoegd. Voeg rollen en benodigde aantallen toe.");
+    await insertRow("shifts", { event_id: form.dataset.id, title: String(values.title).trim(), date: values.date, start_time: values.start_time, end_time: values.end_time, briefing: String(values.briefing).trim(), announcement: "", required_people: 0, published: false });
+    toast("Conceptshift toegevoegd. Voeg rollen toe en publiceer de shift.");
   });
   if (form.dataset.form === "shift-edit" && isManager()) run(async () => {
     await updateRow("shifts", form.dataset.id, { title: String(values.title).trim(), date: values.date, start_time: values.start_time, end_time: values.end_time, briefing: String(values.briefing).trim(), announcement: String(values.announcement).trim() });
@@ -536,8 +631,9 @@ root.addEventListener("submit", event => {
     toast(`${name} toegevoegd.`);
   });
   if (form.dataset.form === "task" && isManager()) run(async () => {
-    const row = { title: String(values.title).trim(), description: String(values.description).trim(), priority: values.priority, status: values.status, assigned_to: values.assigned_to || null };
+    const row = { title: String(values.title).trim(), description: String(values.description).trim(), priority: values.priority, status: values.status, assigned_to: values.assigned_to || null, notify_all: values.notify_all === "on" };
     if (!row.title) throw new Error("Geef de taak een titel.");
+    if (row.notify_all && row.priority !== "urgent") throw new Error("Kies prioriteit Urgent voor een melding aan de hele shift.");
     if (!supa) row.completed_at = row.status === "klaar" ? new Date().toISOString() : null;
     if (form.dataset.task) await updateRow("tasks", form.dataset.task, row);
     else await insertRow("tasks", { shift_id: form.dataset.id, ...row, created_by: state.user.id, created_at: new Date().toISOString(), completed_at: null });
@@ -561,7 +657,8 @@ root.addEventListener("submit", event => {
 if (supa) supa.auth.onAuthStateChange((event) => {
   if (event === "PASSWORD_RECOVERY") { state.authMode = "reset"; setTimeout(render, 0); }
   if (event === "SIGNED_OUT") {
-    state.user = null; state.profile = null; state.data = null;
+    if (supportsPush()) pushRegistration().then(registration => registration.pushManager.getSubscription()).then(subscription => subscription?.unsubscribe()).catch(console.error);
+    state.user = null; state.profile = null; state.data = null; state.notificationPreferences = null; state.pushEnabled = false;
     if (state.authMode !== "reset") setTimeout(render, 0);
   }
   if (event === "SIGNED_IN" && !state.user && state.authMode !== "reset") {
@@ -569,4 +666,5 @@ if (supa) supa.auth.onAuthStateChange((event) => {
   }
 });
 window.addEventListener("hashchange", render);
+if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("./sw.js").catch(console.error);
 bootstrap().catch(error => { console.error(error); root.innerHTML = `<div class="crew-gateway"><h1>App kon niet starten</h1><p>${e(getError(error))}</p></div>`; });
