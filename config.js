@@ -5,5 +5,8 @@ window.LIEF_SUPABASE = {
   publishableKey: "sb_publishable_vBuTc-isr9Ve1nYLNrETRw_lq-hH8x6",
 };
 
+// Publieke productie-URL voor e-mailverificatie en wachtwoordherstel.
+window.LIEF_APP = { productionUrl: "https://liefamsterdam.vercel.app" };
+
 // Publieke sleutel voor browser-push; de privésleutel staat uitsluitend server-side.
 window.LIEF_VAPID_PUBLIC_KEY = "BOvVIoyS83lnYyaspS7Wdfazb6nAcybRHpIImwQKem2bor47tIi3T0XxD-C5RLjrLPN-dnHF8MPBWe_ia84hDvY";

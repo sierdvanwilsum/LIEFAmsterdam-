@@ -1,4 +1,4 @@
--- Voer dit eenmalig uit na schema.sql. Herhaalbaar voor bestaande projecten.
+-- Voer dit uit na schema.sql; herhaalbaar voor bestaande projecten.
 -- Push wordt pas verzonden nadat de Edge Function en Database Webhook zijn ingericht.
 
 begin;
@@ -38,6 +38,7 @@ create table if not exists public.notifications (
   target_url text not null,
   source_key text not null,
   created_at timestamptz not null default now(),
+  read_at timestamptz,
   delivery_state text not null default 'pending' check (delivery_state in ('pending', 'sending', 'sent', 'failed', 'no_subscription')),
   delivered_at timestamptz,
   delivery_count integer not null default 0,
@@ -45,6 +46,7 @@ create table if not exists public.notifications (
   unique (user_id, source_key)
 );
 create index if not exists notifications_user_date_idx on public.notifications(user_id, created_at desc);
+alter table public.notifications add column if not exists read_at timestamptz;
 
 alter table public.notification_preferences enable row level security;
 alter table public.push_subscriptions enable row level security;
@@ -53,6 +55,7 @@ alter table public.notifications enable row level security;
 revoke all on public.notification_preferences, public.push_subscriptions, public.notifications from anon, authenticated;
 grant select, insert, update on public.notification_preferences to authenticated;
 grant select on public.notifications to authenticated;
+grant update (read_at) on public.notifications to authenticated;
 
 drop policy if exists "eigen meldingsvoorkeuren" on public.notification_preferences;
 create policy "eigen meldingsvoorkeuren" on public.notification_preferences
@@ -61,6 +64,19 @@ create policy "eigen meldingsvoorkeuren" on public.notification_preferences
 drop policy if exists "eigen meldingen" on public.notifications;
 create policy "eigen meldingen" on public.notifications
   for select to authenticated using (user_id = (select auth.uid()));
+drop policy if exists "eigen meldingen gelezen" on public.notifications;
+create policy "eigen meldingen gelezen" on public.notifications
+  for update to authenticated using (user_id = (select auth.uid()))
+  with check (user_id = (select auth.uid()));
+
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
+    and not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime'
+      and schemaname = 'public' and tablename = 'notifications') then
+    alter publication supabase_realtime add table public.notifications;
+  end if;
+end $$;
 
 -- Ingeschreven crew kan conceptshifts niet zien. Managers kunnen ze wel beheren.
 drop policy if exists "shifts voor ingelogde crew" on public.shifts;
@@ -151,7 +167,7 @@ begin
       ' · ' || left(new.start_time::text, 5) || '-' || left(new.end_time::text, 5);
     for v_person in select id from public.profiles where role = 'employee' loop
       perform public.enqueue_crew_notification(v_person.id, 'new_shifts',
-        'Nieuwe LIEF-shift beschikbaar', v_body, '#signup/' || new.id,
+        'Nieuwe LIEF-shift beschikbaar', v_body, '/planning?shift=' || new.id,
         'new_shift:' || new.id);
     end loop;
   end if;
@@ -175,7 +191,7 @@ begin
       coalesce(v_event, 'Event') || ' · ' || to_char(v_shift.date, 'DD-MM-YYYY') ||
       ' · ' || left(v_shift.start_time::text, 5) || '-' || left(v_shift.end_time::text, 5) ||
       E'\nRol: ' || new.assigned_role,
-      '#room/' || new.shift_id || '/overzicht',
+      '/my-shifts/' || new.shift_id,
       'accepted:' || new.id || ':' || txid_current());
   end if;
   return new;
@@ -201,9 +217,9 @@ for each row execute function public.guard_task_broadcast();
 
 create or replace function public.notify_task_assignment() returns trigger
 language plpgsql security definer set search_path = '' as $$
-declare v_event text; v_person record; v_broadcast boolean; v_new_assignment boolean;
+declare v_event text; v_event_id uuid; v_person record; v_broadcast boolean; v_new_assignment boolean;
 begin
-  select e.title into v_event from public.events e
+  select e.id, e.title into v_event_id, v_event from public.events e
   join public.shifts s on s.event_id = e.id where s.id = new.shift_id;
   if tg_op = 'INSERT' then
     v_broadcast := new.priority = 'urgent' and new.notify_all;
@@ -219,13 +235,13 @@ begin
       where shift_id = new.shift_id and available loop
       perform public.enqueue_crew_notification(v_person.user_id, 'new_tasks',
         'Urgente taak · ' || coalesce(v_event, 'Event'), new.title,
-        '#room/' || new.shift_id || '/taken/' || new.id,
+        '/events/' || v_event_id || '/shifts/' || new.shift_id || '?tab=tasks&task=' || new.id,
         'urgent_task:' || new.id || ':' || txid_current());
     end loop;
   elsif v_new_assignment and (select auth.uid()) is distinct from new.assigned_to then
     perform public.enqueue_crew_notification(new.assigned_to, 'new_tasks',
       'Nieuwe taak · ' || coalesce(v_event, 'Event'), new.title,
-      '#room/' || new.shift_id || '/taken/' || new.id,
+      '/events/' || v_event_id || '/shifts/' || new.shift_id || '?tab=tasks&task=' || new.id,
       'assigned_task:' || new.id || ':' || new.assigned_to || ':' || txid_current());
   end if;
   return new;
@@ -248,7 +264,7 @@ begin
         'Je shift is gewijzigd', coalesce(v_event, 'Event') || ' · ' ||
         to_char(new.date, 'DD-MM-YYYY') || ' · ' ||
         left(new.start_time::text, 5) || '-' || left(new.end_time::text, 5),
-        '#room/' || new.id || '/overzicht',
+        '/my-shifts/' || new.id,
         'changed_shift:' || new.id || ':' || txid_current());
     end loop;
   end if;
@@ -270,7 +286,7 @@ begin
       where shift_id = new.id and available loop
       perform public.enqueue_crew_notification(v_person.user_id, 'event_announcements',
         'Belangrijk · ' || coalesce(v_event, 'Event'), new.announcement,
-        '#room/' || new.id || '/overzicht',
+        '/notifications',
         'announcement:' || new.id || ':' || txid_current());
     end loop;
   end if;
@@ -296,7 +312,7 @@ begin
       where shift_id = new.shift_id and available loop
       perform public.enqueue_crew_notification(v_person.user_id, 'document_changed',
         'Document gewijzigd', new.title,
-        '#room/' || new.shift_id || '/documenten',
+        '/events/' || new.event_id || '/shifts/' || new.shift_id || '?tab=documents',
         'document:' || new.id || ':' || txid_current());
     end loop;
   end if;

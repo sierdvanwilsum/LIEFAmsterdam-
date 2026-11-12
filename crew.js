@@ -1,12 +1,14 @@
 "use strict";
 
 const root = document.getElementById("app");
+const authCallbackType = new URLSearchParams(location.hash.slice(1)).get("type") || new URLSearchParams(location.search).get("type");
+const authCallbackPresent = /(?:^#|&)access_token=/.test(location.hash) || new URLSearchParams(location.search).has("code");
 const supaConfig = window.LIEF_SUPABASE || {};
 const configured = Boolean(supaConfig.url && supaConfig.publishableKey);
 const supa = configured && window.supabase ? window.supabase.createClient(supaConfig.url, supaConfig.publishableKey) : null;
 const roleNames = ["Bar", "Runner", "Debras", "Opbouw", "Afbouw", "Productie", "Garderobe", "Hospitality", "Oempa Loempa", "Routing", "Entertainment support", "Anders"];
 const documentTypes = ["Draaiboek", "Factsheet", "Plattegrond", "Briefing", "Overig"];
-const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: new URLSearchParams(location.search).get("auth") === "recovery" ? "reset" : "login", filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, roomChannel: null, roomChannelId: null, showEventForm: false, notificationPreferences: null, notificationError: "", pushEnabled: false };
+const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: location.pathname === "/auth/reset-password" ? "reset-loading" : location.pathname === "/auth/confirmed" ? "confirmed-loading" : "login", recoveryReady: false, filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, roomChannel: null, roomChannelId: null, taskRefreshing: false, taskRefreshId: null, taskRefreshPromise: null, showEventForm: false, notificationPreferences: null, notificationError: "", notifications: [], notificationsError: "", notificationChannel: null, pushEnabled: false };
 const notificationChoices = [
   ["new_tasks", "Nieuwe taken"], ["new_shifts", "Nieuwe shifts"],
   ["shift_accepted", "Shift geaccepteerd"], ["shift_changed", "Shift gewijzigd"],
@@ -16,7 +18,7 @@ const defaultNotificationPreferences = Object.fromEntries(notificationChoices.ma
 function supportsPush() { return Boolean(supa && window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && window.LIEF_VAPID_PUBLIC_KEY); }
 function vapidBytes() { const value = window.LIEF_VAPID_PUBLIC_KEY.replace(/-/g, "+").replace(/_/g, "/"); return Uint8Array.from(atob(value.padEnd(Math.ceil(value.length / 4) * 4, "=")), c => c.charCodeAt(0)); }
 async function pushRegistration() {
-  await navigator.serviceWorker.register("./sw.js");
+  await navigator.serviceWorker.register("/sw.js");
   return Promise.race([
     navigator.serviceWorker.ready,
     new Promise((_, reject) => setTimeout(() => reject(new Error("Service worker kon niet starten.")), 8000)),
@@ -47,13 +49,39 @@ async function loadNotificationSettings() {
   } else state.pushEnabled = false;
 }
 
-function appUrl() { return `${location.origin}${location.pathname}`; }
-function resetUrl() { return `${appUrl()}?auth=recovery`; }
-function clearResetUrl() {
-  const url = new URL(location.href);
-  url.searchParams.delete("auth");
-  history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+async function loadNotifications() {
+  if (!supa || !state.user) return;
+  const result = await supa.from("notifications").select("id,category,title,body,target_url,created_at,read_at").eq("user_id", state.user.id).order("created_at", { ascending: false });
+  if (result.error) {
+    state.notificationsError = "Meldingen kunnen nog niet worden geladen. Voer de inbox-migratie uit in Supabase.";
+    return;
+  }
+  state.notificationsError = "";
+  state.notifications = result.data || [];
+  if (currentRoute().page === "notifications") render();
 }
+function startNotificationChannel() {
+  if (!supa || !state.user || state.notificationChannel) return;
+  state.notificationChannel = supa.channel(`crew-notifications-${state.user.id}`)
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${state.user.id}` }, () => loadNotifications().then(render).catch(console.error))
+    .subscribe();
+}
+function safeNotificationTarget(value) {
+  if (typeof value !== "string" || !value) return "/notifications";
+  if (value.startsWith("#")) return `/${value}`;
+  try {
+    const url = new URL(value, location.origin);
+    return url.origin === location.origin && url.pathname.startsWith("/") ? `${url.pathname}${url.search}${url.hash}` : "/notifications";
+  } catch { return "/notifications"; }
+}
+
+function authRedirect(path) {
+  const origin = window.LIEF_APP?.productionUrl;
+  if (!origin || new URL(origin).protocol !== "https:") throw new Error("De productie-URL voor e-mail is niet ingesteld.");
+  return new URL(path, origin).href;
+}
+function clearAuthCallback() { history.replaceState(null, "", location.pathname); }
+function leaveAuth() { state.authMode = "login"; state.recoveryReady = false; history.replaceState(null, "", "/"); render(); }
 
 function e(value) { return String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
 function icon(name, size = 20) {
@@ -72,6 +100,8 @@ function icon(name, size = 20) {
     users: '<path d="M16 20v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 20v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
     file: '<path d="M5 3h9l5 5v13H5z"/><path d="M14 3v6h5M8 14h8M8 18h6"/>',
     alert: '<path d="M12 3 2 21h20L12 3Z"/><path d="M12 9v5m0 3h.01"/>',
+    refresh: '<path d="M20 11a8 8 0 1 0-2.3 6.1M20 4v7h-7"/>',
+    bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>',
   };
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p[name] || p.ticket}</svg>`;
 }
@@ -110,7 +140,8 @@ function orderedShifts() { return [...(state.data?.shifts || [])].sort((a, b) =>
 function upcomingShifts() { const today = todayIso(); return orderedShifts().filter(shift => shift.date >= today && (isManager() || shift.published !== false)); }
 function badge(text, tone = "soft") { return `<span class="crew-badge ${tone}">${e(text)}</span>`; }
 function button(label, action, id = "", tone = "primary", extra = "") { return `<button type="button" class="crew-button ${tone}" data-action="${action}" ${id ? `data-id="${e(id)}"` : ""} ${extra}><span>${e(label)}</span><span class="crew-button-icon">${icon("arrow", 17)}</span></button>`; }
-function go(path) { const target = `#${path}`; if (location.hash === target) render(); else location.hash = target; window.scrollTo({ top: 0, behavior: "instant" }); }
+function go(path) { const target = `#${path}`; if (location.pathname.startsWith("/auth/")) history.replaceState(null, "", "/"); if (location.hash === target) render(); else location.hash = target; window.scrollTo({ top: 0, behavior: "instant" }); }
+function goPath(path) { history.pushState(null, "", path); render(); window.scrollTo({ top: 0, behavior: "instant" }); }
 function openSignup(id) {
   const signup = mySignup(id);
   state.draftShift = id;
@@ -119,7 +150,20 @@ function openSignup(id) {
   state.available = signup?.available ?? true;
   go(`signup/${id}`);
 }
-function currentRoute() { const [page = "home", id, tab, itemId] = location.hash.replace(/^#\/?/, "").split("/"); return { page: page || "home", id, tab, itemId }; }
+function currentRoute() {
+  if (location.hash && !location.hash.includes("=")) {
+    const [page = "home", id, tab, itemId] = location.hash.replace(/^#\/?/, "").split("/");
+    return { page: page || "home", id, tab, itemId };
+  }
+  const parts = location.pathname.split("/").filter(Boolean);
+  const query = new URLSearchParams(location.search);
+  if (parts[0] === "events" && parts[2] === "shifts" && parts[3]) return { page: "room", id: parts[3], eventId: parts[1], tab: ({ tasks: "taken", crew: "crew", documents: "documenten" })[query.get("tab")] || "overzicht", itemId: query.get("task") };
+  if (parts[0] === "my-shifts" && parts[1]) return { page: "room", id: parts[1], tab: "overzicht" };
+  if (parts[0] === "planning" && query.get("shift")) return { page: "signup", id: query.get("shift") };
+  if (parts[0] === "notifications") return { page: "notifications" };
+  if (parts[0] === "planning") return { page: "planning" };
+  return { page: "home" };
+}
 function toast(message) { state.toast = message; render(); }
 function getError(error) {
   if (error?.name === "Error" && error.message) return error.message;
@@ -155,12 +199,81 @@ async function loadData() {
   state.data.role_occupancy = results[tables.length + 1].data || [];
 }
 async function refresh() { await loadData(); render(); }
+function orderedTasks(shiftId) {
+  return tasksOf(shiftId).sort((a, b) => ({ urgent: 0, belangrijk: 1, normaal: 2 }[a.priority] - { urgent: 0, belangrijk: 1, normaal: 2 }[b.priority]) || ({ "te doen": 0, bezig: 1, klaar: 2 }[a.status] - { "te doen": 0, bezig: 1, klaar: 2 }[b.status]));
+}
+function paintTaskRegion(shiftId) {
+  const route = currentRoute();
+  if (route.page !== "room" || route.id !== shiftId || route.tab !== "taken") return;
+  const tasks = orderedTasks(shiftId);
+  const list = document.getElementById("task-list");
+  const count = document.getElementById("task-open-count");
+  if (list) list.innerHTML = tasks.length ? tasks.map(task => taskCard(task)).join("") : empty("Geen taken", "Voor deze shift staan nog geen taken klaar.");
+  if (count) count.textContent = `${tasks.filter(task => task.status !== "klaar").length} open`;
+  if (route.itemId) document.getElementById(`task-${route.itemId}`)?.scrollIntoView({ block: "center" });
+}
+function paintTaskRefreshState(message = "") {
+  const button = document.getElementById("task-refresh");
+  const status = document.getElementById("task-refresh-status");
+  if (button) { button.disabled = state.taskRefreshing; button.setAttribute("aria-busy", String(state.taskRefreshing)); }
+  if (status) status.textContent = message || (state.taskRefreshing ? "Taken verversen…" : "");
+}
+async function refreshTasks(shiftId) {
+  if (!state.data) return;
+  if (state.taskRefreshPromise && state.taskRefreshId === shiftId) return state.taskRefreshPromise;
+  state.taskRefreshId = shiftId;
+  state.taskRefreshing = true;
+  paintTaskRefreshState();
+  const work = (async () => {
+    try {
+      if (supa) {
+        const result = await supa.from("tasks").select("*").eq("shift_id", shiftId);
+        if (result.error) throw result.error;
+        state.data.tasks = state.data.tasks.filter(task => task.shift_id !== shiftId).concat(result.data || []);
+      }
+      paintTaskRegion(shiftId);
+      if (state.taskRefreshId === shiftId) paintTaskRefreshState("Taken bijgewerkt");
+    } catch (error) {
+      console.error(error);
+      if (state.taskRefreshId === shiftId) paintTaskRefreshState("Verversen mislukt. Probeer opnieuw.");
+    } finally {
+      if (state.taskRefreshId === shiftId) {
+        state.taskRefreshing = false;
+        state.taskRefreshPromise = null;
+        const button = document.getElementById("task-refresh");
+        if (button) { button.disabled = false; button.setAttribute("aria-busy", "false"); }
+      }
+    }
+  })();
+  state.taskRefreshPromise = work;
+  return work;
+}
 async function bootstrap() {
   if (configured && !supa) { root.innerHTML = `<div class="crew-gateway"><h1>Verbinding niet beschikbaar</h1><p>De Supabase-bibliotheek kon niet geladen worden. Controleer je internetverbinding.</p></div>`; return; }
   if (!configured) { render(); return; }
   const sessionResult = await supa.auth.getSession();
-  if (sessionResult.error) { root.innerHTML = `<div class="crew-gateway"><h1>Verbinding mislukt</h1><p>${e(getError(sessionResult.error))}</p></div>`; return; }
-  if (state.authMode === "reset") { render(); return; }
+  if (sessionResult.error) {
+    if (location.pathname === "/auth/reset-password" || location.pathname === "/auth/confirmed") {
+      state.authMode = location.pathname === "/auth/reset-password" ? "reset-invalid" : "confirmed-error";
+      render(); return;
+    }
+    root.innerHTML = `<div class="crew-gateway"><h1>Verbinding mislukt</h1><p>${e(getError(sessionResult.error))}</p></div>`; return;
+  }
+  if (location.pathname === "/auth/confirmed") {
+    const callbackError = new URLSearchParams(location.search).get("error") || new URLSearchParams(location.hash.slice(1)).get("error");
+    const verified = !callbackError && authCallbackPresent && sessionResult.data.session ? await supa.auth.getUser() : null;
+    state.authMode = verified?.data?.user?.email_confirmed_at ? "confirmed" : "confirmed-error";
+    if (state.authMode === "confirmed") clearAuthCallback();
+    render();
+    return;
+  }
+  if (location.pathname === "/auth/reset-password") {
+    state.recoveryReady = Boolean(sessionResult.data.session && (state.recoveryReady || authCallbackPresent && authCallbackType === "recovery"));
+    state.authMode = state.recoveryReady ? "reset" : "reset-invalid";
+    if (state.recoveryReady) clearAuthCallback();
+    render();
+    return;
+  }
   if (!sessionResult.data.session) { state.user = null; state.profile = null; state.data = null; render(); return; }
   const { data, error } = await supa.auth.getUser();
   if (error || !data?.user) { root.innerHTML = `<div class="crew-gateway"><h1>Sessie verlopen</h1><p>Log opnieuw in om verder te gaan.</p><button class="crew-button secondary" data-action="logout" type="button">Uitloggen</button></div>`; return; }
@@ -170,26 +283,29 @@ async function bootstrap() {
   state.profile = result.data;
   await loadData();
   await loadNotificationSettings();
-  if (!location.hash && isManager()) go("manager");
+  await loadNotifications();
+  startNotificationChannel();
+  if (location.pathname === "/" && !location.hash && isManager()) go("manager");
   else render();
 }
 
-function logo() { return `<img class="crew-logo" src="design-references/image copy Lief Logo 2.png" alt="LIEF Amsterdam" />`; }
+function logo() { return `<img class="crew-logo" src="/design-references/image copy Lief Logo 2.png" alt="LIEF Amsterdam" />`; }
 function navItems() { return [["home", "Home", "home"], ["planning", "Planning", "calendar"], ["shifts", "Mijn shifts", "ticket"], ["rooms", "Eventruimte", "room"], ["profile", "Profiel", "user"], ...(isManager() ? [["manager", "Manager", "grid"]] : [])]; }
 function nav(active, mobile = false) {
   return `<nav class="${mobile ? "crew-bottom-nav" : "crew-desktop-nav"}" aria-label="Hoofdnavigatie">${navItems().map(([path, label, symbol]) => `<a href="#${path}" class="${active === path ? "active" : ""}" aria-current="${active === path ? "page" : "false"}">${icon(symbol, mobile ? 18 : 17)}<span>${e(label)}</span></a>`).join("")}</nav>`;
 }
 function shell(content, active = "home") {
   const demo = !configured ? `<span class="crew-demo-label">DEMO · voorbeeldgegevens</span>` : "";
-  return `<div class="crew-shell"><header class="crew-header"><a href="#home" class="crew-brand" aria-label="LIEF Amsterdam, naar home">${logo()}<span class="crew-brand-copy"><strong>CREW APP</strong><small>LIEF AMSTERDAM</small></span></a>${nav(active)}<div class="crew-header-end">${demo}<span class="crew-avatar" aria-label="${e(state.profile?.full_name)}">${e(firstName().slice(0, 1).toUpperCase())}</span></div></header><main class="crew-main" id="main-content">${content}</main>${nav(active, true)}${state.toast ? `<div class="toast" role="status">${e(state.toast)}</div>` : ""}</div>`;
+  const unread = state.notifications.filter(item => !item.read_at).length;
+  return `<div class="crew-shell"><header class="crew-header"><a href="#home" class="crew-brand" aria-label="LIEF Amsterdam, naar home">${logo()}<span class="crew-brand-copy"><strong>CREW APP</strong><small>LIEF AMSTERDAM</small></span></a>${nav(active)}<div class="crew-header-end">${demo}<a href="/notifications" class="crew-notification-link" aria-label="Meldingen${unread ? `, ${unread} ongelezen` : ""}">${icon("bell", 21)}${unread ? `<span class="crew-notification-count">${unread > 99 ? "99+" : unread}</span>` : ""}</a><span class="crew-avatar" aria-label="${e(state.profile?.full_name)}">${e(firstName().slice(0, 1).toUpperCase())}</span></div></header><main class="crew-main" id="main-content">${content}</main>${nav(active, true)}${state.toast ? `<div class="toast" role="status">${e(state.toast)}</div>` : ""}</div>`;
 }
 function heading(eyebrow, title, description = "") { return `<div class="crew-heading"><span class="eyebrow">${e(eyebrow)}</span><h1>${e(title)}</h1>${description ? `<p>${e(description)}</p>` : ""}</div>`; }
 function empty(title, description, action = "", label = "") { return `<div class="crew-empty"><span class="crew-empty-icon">✦</span><h2>${e(title)}</h2><p>${e(description)}</p>${action ? button(label, "go", action) : ""}</div>`; }
 
 function gateway() {
   const mode = state.authMode;
-  const titles = { login: "Welkom bij de crew.", signup: "Maak je account.", forgot: "Wachtwoord vergeten?", reset: "Kies een nieuw wachtwoord." };
-  const descriptions = { login: "Planning, taken en alle informatie voor jouw event op één plek.", signup: "Meld je aan met je eigen e-mailadres. Je begint als medewerker.", forgot: "Vul je e-mailadres in. Als er een account bestaat, ontvang je een herstelmail.", reset: "Vul een nieuw wachtwoord in voor je account." };
+  const titles = { login: "Welkom bij de crew.", signup: "Maak je account.", forgot: "Wachtwoord vergeten?", reset: "Kies een nieuw wachtwoord.", "reset-loading": "Herstellink controleren.", "reset-invalid": "Herstellink verlopen.", "reset-success": "Wachtwoord aangepast", "confirmed-loading": "Bevestiging controleren.", confirmed: "E-mailadres bevestigd", "confirmed-error": "Bevestigingslink ongeldig." };
+  const descriptions = { login: "Planning, taken en alle informatie voor jouw event op één plek.", signup: "Meld je aan met je eigen e-mailadres. Je begint als medewerker.", forgot: "Vul je e-mailadres in. Als er een account bestaat, ontvang je een herstelmail.", reset: "Vul een nieuw wachtwoord in voor je account.", "reset-loading": "Even geduld terwijl we je herstellink controleren.", "reset-invalid": "Vraag een nieuwe herstellink aan via Wachtwoord vergeten.", "reset-success": "Je kunt nu opnieuw inloggen.", "confirmed-loading": "Even geduld terwijl we je e-mailadres controleren.", confirmed: "Je account is klaar voor gebruik.", "confirmed-error": "Ga terug naar inloggen of neem contact op met LIEF." };
   const emailInput = `<label>E-mailadres<input name="email" type="email" autocomplete="email" required /></label>`;
   const passwordInput = `<label>Wachtwoord<input name="password" type="password" autocomplete="current-password" required /></label>`;
   const newPasswordInputs = `<label>Nieuw wachtwoord<input name="password" type="password" autocomplete="new-password" minlength="8" required /></label><label>Herhaal wachtwoord<input name="password_confirm" type="password" autocomplete="new-password" minlength="8" required /></label>`;
@@ -200,8 +316,15 @@ function gateway() {
     signup: `<form data-form="signup" class="crew-form"><label>Volledige naam<input name="full_name" type="text" autocomplete="name" maxlength="100" required /></label>${emailInput}${newPasswordInputs}${submit("Account aanmaken")}</form><div class="crew-auth-links">${link("Ik heb al een account", "login")}</div>`,
     forgot: `<form data-form="forgot" class="crew-form">${emailInput}${submit("Stuur herstelmail")}</form><div class="crew-auth-links">${link("Terug naar inloggen", "login")}</div>`,
     reset: `<form data-form="reset" class="crew-form">${newPasswordInputs}${submit("Wachtwoord opslaan")}</form><div class="crew-auth-links">${link("Terug naar inloggen", "login")}</div>`,
+    "reset-loading": "",
+    "confirmed-loading": "",
+    "reset-invalid": `${button("Naar inloggen", "auth-login")}`,
+    "confirmed-error": `${button("Naar inloggen", "auth-login")}`,
+    "reset-success": `${button("Naar inloggen", "auth-login")}`,
+    confirmed: `${button("Naar inloggen", "auth-login")}`,
   };
-  return `<div class="crew-gateway"><div class="crew-gateway-card">${logo()}<span class="eyebrow">LIEF AMSTERDAM · INTERNE CREW APP</span><h1>${configured ? titles[mode] : titles.login}</h1><p>${configured ? descriptions[mode] : descriptions.login}</p>${state.toast ? `<p class="crew-auth-notice" role="status">${e(state.toast)}</p>` : ""}${configured ? `${forms[mode]}<p class="crew-gateway-note">Managerrechten worden door LIEF toegekend.</p>` : `<div class="crew-demo-options">${button("Bekijk als medewerker", "demo-employee")}${button("Bekijk als manager", "demo-manager", "", "secondary")}</div><p class="crew-gateway-note">Demomodus met fictieve gegevens. Vul config.js in om Supabase te gebruiken.</p>`}</div></div>`;
+  const managerNote = ["login", "signup"].includes(mode) ? '<p class="crew-gateway-note">Managerrechten worden door LIEF toegekend.</p>' : "";
+  return `<div class="crew-gateway"><div class="crew-gateway-card">${logo()}<span class="eyebrow">LIEF AMSTERDAM · INTERNE CREW APP</span><h1>${configured ? titles[mode] : titles.login}</h1><p>${configured ? descriptions[mode] : descriptions.login}</p>${state.toast ? `<p class="crew-auth-notice" role="status">${e(state.toast)}</p>` : ""}${configured ? `${forms[mode] || ""}${managerNote}` : `<div class="crew-demo-options">${button("Bekijk als medewerker", "demo-employee")}${button("Bekijk als manager", "demo-manager", "", "secondary")}</div><p class="crew-gateway-note">Demomodus met fictieve gegevens. Vul config.js in om Supabase te gebruiken.</p>`}</div></div>`;
 }
 
 function shiftCard(shift, options = {}) {
@@ -251,6 +374,28 @@ function profilePage() {
   return shell(`${heading("JOUW GEGEVENS", "Profiel")}<div class="crew-profile-card"><div class="crew-profile-avatar">${e(firstName().slice(0, 1).toUpperCase())}</div><div><h2>${e(state.profile.full_name)}</h2>${badge(isManager() ? "Manager" : "Medewerker", isManager() ? "lime" : "soft")}</div></div><div class="crew-white-panel crew-profile-details"><div class="crew-facts"><div><span>E-mailadres</span><strong>${e(state.user.email || "Demo-account")}</strong></div></div>${configured ? `<form class="crew-form" data-form="profile"><label>Volledige naam<input name="full_name" maxlength="100" value="${e(state.profile.full_name)}" required /></label><button class="crew-button primary" type="submit"><span>Naam opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form>` : ""}${button(configured ? "Uitloggen" : "Terug naar demo-keuze", "logout", "", "secondary")}</div>${settings}`, "profile");
 }
 
+function notificationContext(notice) {
+  const match = String(notice.target_url || "").match(/(?:\/shifts\/|#room\/|#signup\/|\?shift=)([0-9a-f-]{36})/i);
+  const shift = match ? shiftOf(match[1]) : null;
+  const event = shift ? eventOf(shift) : null;
+  return event ? `${event.title} · ${dateText(shift.date, { day: "numeric", month: "short" })}` : "";
+}
+function notificationsPage() {
+  const unread = state.notifications.filter(item => !item.read_at).length;
+  const items = state.notifications.map(item => {
+    const type = notificationChoices.find(([key]) => key === item.category)?.[1] || "Melding";
+    const context = notificationContext(item);
+    return `<article class="crew-notification-card ${item.read_at ? "" : "unread"}">
+      <div class="crew-notification-card-head"><span class="eyebrow">${e(type)}</span>${!item.read_at ? badge("Nieuw", "lime") : badge("Gelezen", "soft")}</div>
+      <h2>${e(item.title)}</h2><p>${e(item.body)}</p>
+      ${context ? `<span class="crew-notification-context">${e(context)}</span>` : ""}
+      <time datetime="${e(item.created_at)}">${e(dateTimeText(item.created_at))}</time>
+      <div class="crew-notification-actions">${button("Open melding", "open-notification", item.id)}${!item.read_at ? `<button type="button" class="crew-small-button" data-action="read-notification" data-id="${e(item.id)}">Markeer als gelezen</button>` : ""}</div>
+    </article>`;
+  }).join("");
+  return shell(`${heading("JOUW UPDATES", "Meldingen", "Alles over je shifts, taken en events op één plek.")}<div class="crew-section-head"><h2>${unread} ongelezen</h2><button type="button" class="crew-small-button" data-action="read-all-notifications" ${unread ? "" : "disabled"}>Alles als gelezen markeren</button></div>${state.notificationsError ? `<p class="crew-alert">${e(state.notificationsError)}</p>` : ""}<div class="crew-notification-grid">${items || empty("Nog geen meldingen", "Nieuwe updates verschijnen hier zodra ze voor jou klaarstaan.")}</div>`, "notifications");
+}
+
 function taskCard(task, compact = false) {
   const mine = task.assigned_to === state.user?.id;
   const detail = compact ? `<a class="crew-text-link" href="#room/${e(task.shift_id)}/taken">Bekijk taak ${icon("arrow", 15)}</a>` : `<div class="crew-task-actions">${!isManager() && !task.assigned_to && task.status !== "klaar" ? button("Claim taak", "claim-task", task.id) : ""}${!isManager() && mine && task.status === "te doen" ? button("Start taak", "start-task", task.id, "secondary") : ""}${!isManager() && mine && task.status !== "klaar" ? button("Afronden", "finish-task", task.id) : ""}${isManager() ? `<button type="button" class="crew-small-button" data-action="edit-task" data-id="${e(task.id)}">Wijzig</button><button type="button" class="crew-small-button danger" data-action="delete-task" data-id="${e(task.id)}">Verwijder</button>` : ""}</div>`;
@@ -268,8 +413,8 @@ function overviewTab(shift) {
   return `<div class="crew-room-grid"><section class="crew-white-panel"><h2>Briefing</h2><p class="crew-long-text">${e(shift.briefing || event.description || "De briefing volgt binnenkort.")}</p></section><aside><div class="crew-info-card accent"><span class="eyebrow">BELANGRIJKE MEDEDELING</span><h3>${shift.announcement ? "Goed om te weten" : "Nog geen mededelingen"}</h3><p>${e(shift.announcement || "Nieuwe informatie verschijnt hier zodra de manager die deelt.")}</p></div><div class="crew-info-card"><span class="eyebrow">EVENTMANAGER</span><h3>${e(event.manager_id ? nameOf(event.manager_id) : "LIEF eventteam")}</h3></div></aside></div>`;
 }
 function tasksTab(shift) {
-  const tasks = tasksOf(shift.id).sort((a, b) => ({ urgent: 0, belangrijk: 1, normaal: 2 }[a.priority] - { urgent: 0, belangrijk: 1, normaal: 2 }[b.priority]) || ({ "te doen": 0, bezig: 1, klaar: 2 }[a.status] - { "te doen": 0, bezig: 1, klaar: 2 }[b.status]));
-  return `<div class="crew-room-grid"><section><div class="crew-section-head"><h2>Taken</h2>${badge(`${tasks.filter(t => t.status !== "klaar").length} open`, "open")}</div><div class="crew-task-list">${tasks.length ? tasks.map(task => taskCard(task)).join("") : empty("Geen taken", "Voor deze shift staan nog geen taken klaar.")}</div></section>${isManager() ? `<aside>${taskForm(shift.id)}</aside>` : `<aside><div class="crew-info-card"><span class="eyebrow">SNEL AAN DE SLAG</span><h3>Pak een taak op.</h3><p>Claim een vrije taak, zet hem op Bezig en rond hem af zodra het werk klaar is.</p></div></aside>`}</div>`;
+  const tasks = orderedTasks(shift.id);
+  return `<div class="crew-room-grid"><section><div class="crew-section-head"><h2>Taken</h2><div class="crew-task-tools"><span id="task-open-count" class="crew-badge open">${tasks.filter(t => t.status !== "klaar").length} open</span><button id="task-refresh" type="button" class="crew-refresh-button" data-action="refresh-tasks" data-id="${e(shift.id)}" aria-label="Taken verversen" ${state.taskRefreshing ? "disabled" : ""}>${icon("refresh", 20)}<span>Ververs</span></button></div></div><p id="task-refresh-status" class="crew-refresh-status" role="status">${state.taskRefreshing ? "Taken verversen…" : ""}</p><div id="task-list" class="crew-task-list">${tasks.length ? tasks.map(task => taskCard(task)).join("") : empty("Geen taken", "Voor deze shift staan nog geen taken klaar.")}</div></section>${isManager() ? `<aside>${taskForm(shift.id)}</aside>` : `<aside><div class="crew-info-card"><span class="eyebrow">SNEL AAN DE SLAG</span><h3>Pak een taak op.</h3><p>Claim een vrije taak, zet hem op Bezig en rond hem af zodra het werk klaar is.</p></div></aside>`}</div>`;
 }
 function crewTab(shift) {
   const members = signupsOf(shift.id);
@@ -318,9 +463,9 @@ function manageEventPage(event) {
 }
 
 function render() {
-  if (configured && state.authMode === "reset") { root.innerHTML = gateway(); return; }
+  if (configured && location.pathname.startsWith("/auth/")) { root.innerHTML = gateway(); return; }
   if (!state.profile || !state.data) { root.innerHTML = gateway(); return; }
-  const { page, id, tab, itemId } = currentRoute();
+  const { page, id, tab, itemId, eventId } = currentRoute();
   const shift = shiftOf(id), event = state.data.events.find(item => item.id === id);
   if (page === "signup" && shift && state.draftShift !== id) {
     const signup = mySignup(id);
@@ -329,18 +474,19 @@ function render() {
     state.secondRole = signup?.second_preference || "";
     state.available = signup?.available ?? true;
   }
-  const allowed = page === "room" && shift && canRoom(id);
+  const allowed = page === "room" && shift && (!eventId || shift.event_id === eventId) && canRoom(id);
   if (page === "room" && !allowed) root.innerHTML = shell(empty("Geen toegang", "Meld je aan voor deze shift om de eventruimte te openen.", "planning", "Bekijk planning"), "rooms");
   else if (page === "room") root.innerHTML = roomPage(shift, tab);
   else if (page === "signup" && shift) root.innerHTML = signupPage(shift);
   else if (page === "shifts") root.innerHTML = myShiftsPage();
   else if (page === "rooms") root.innerHTML = roomsPage();
   else if (page === "planning") root.innerHTML = planningPage();
+  else if (page === "notifications") root.innerHTML = notificationsPage();
   else if (page === "profile") root.innerHTML = profilePage();
   else if (page === "manager" && isManager()) root.innerHTML = managerPage();
   else if (page === "manage" && event && isManager()) root.innerHTML = manageEventPage(event);
   else root.innerHTML = homePage();
-  document.title = `${page === "room" ? "Eventruimte" : page === "manager" ? "Manager" : "Crew"} · LIEF Amsterdam`;
+  document.title = `${page === "room" ? "Eventruimte" : page === "manager" ? "Manager" : page === "notifications" ? "Meldingen" : "Crew"} · LIEF Amsterdam`;
   if (allowed && tab === "taken" && itemId) requestAnimationFrame(() => document.getElementById(`task-${itemId}`)?.scrollIntoView({ block: "center" }));
   state.toast = "";
   const roomId = allowed ? id : null;
@@ -349,7 +495,8 @@ function render() {
     state.roomChannel = null;
     state.roomChannelId = roomId;
     if (roomId) state.roomChannel = supa.channel(`shift-tasks-${roomId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "tasks", filter: `shift_id=eq.${roomId}` }, () => refresh().catch(console.error)).subscribe();
+      .on("postgres_changes", { event: "*", schema: "public", table: "tasks", filter: `shift_id=eq.${roomId}` }, () => refreshTasks(roomId).catch(console.error))
+      .subscribe(status => { if (status === "SUBSCRIBED") refreshTasks(roomId).catch(console.error); });
   }
 }
 
@@ -368,22 +515,54 @@ async function deleteRow(table, id) {
   else state.data[table] = state.data[table].filter(row => row.id !== id);
   await refresh();
 }
+async function markNotificationRead(id) {
+  const notice = state.notifications.find(item => item.id === id);
+  if (!notice || notice.read_at) return;
+  const readAt = new Date().toISOString();
+  if (supa) {
+    const result = await supa.from("notifications").update({ read_at: readAt }).eq("id", id).eq("user_id", state.user.id).select("id");
+    if (result.error) throw result.error;
+    if (!result.data?.length) throw new Error("Melding kon niet worden bijgewerkt.");
+  }
+  notice.read_at = readAt;
+}
 
 root.addEventListener("click", event => {
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action, id = target.dataset.id;
+  if (action === "auth-login") run(async () => {
+    if (supa) { const result = await supa.auth.signOut(); if (result.error) throw result.error; }
+    leaveAuth();
+  });
   if (action === "auth-mode") {
     if (state.authMode === "reset" && id !== "reset") run(async () => {
       const { error } = await supa.auth.signOut();
       if (error) throw error;
-      clearResetUrl();
-      state.authMode = id;
-      state.toast = "";
-      render();
+      leaveAuth();
     });
     else { state.authMode = id; state.toast = ""; render(); }
   }
+  if (action === "refresh-tasks") refreshTasks(id);
+  if (action === "read-notification") run(async () => { await markNotificationRead(id); render(); });
+  if (action === "read-all-notifications") run(async () => {
+    const unread = state.notifications.filter(item => !item.read_at);
+    if (!unread.length) return;
+    const readAt = new Date().toISOString();
+    if (supa) {
+      const result = await supa.from("notifications").update({ read_at: readAt }).eq("user_id", state.user.id).is("read_at", null).select("id");
+      if (result.error) throw result.error;
+      if (!result.data?.length) throw new Error("Meldingen konden niet worden bijgewerkt.");
+    }
+    unread.forEach(item => { item.read_at = readAt; });
+    render();
+  });
+  if (action === "open-notification") run(async () => {
+    const notice = state.notifications.find(item => item.id === id);
+    if (!notice) return;
+    await markNotificationRead(id);
+    goPath(safeNotificationTarget(notice.target_url));
+  });
   if (action === "demo-employee" || action === "demo-manager") {
     state.data = makeDemoData();
     state.user = { id: action === "demo-manager" ? "demo-manager" : "demo-employee", email: "" };
@@ -513,8 +692,10 @@ root.addEventListener("click", event => {
     }
     if (supa) { const { error } = await supa.auth.signOut(); if (error) throw error; }
     if (state.roomChannel && supa) supa.removeChannel(state.roomChannel);
+    if (state.notificationChannel && supa) supa.removeChannel(state.notificationChannel);
     state.roomChannel = null; state.roomChannelId = null; state.user = null; state.profile = null; state.data = null; state.notificationPreferences = null; state.pushEnabled = false; state.authMode = "login";
-    location.hash = ""; render();
+    state.notificationChannel = null; state.notifications = [];
+    history.replaceState(null, "", "/"); render();
   });
 });
 
@@ -567,7 +748,7 @@ root.addEventListener("submit", event => {
     if (password !== String(values.password_confirm)) throw new Error("De wachtwoorden zijn niet gelijk.");
     const { data, error } = await supa.auth.signUp({
       email: String(values.email).trim(), password,
-      options: { data: { full_name }, emailRedirectTo: appUrl() },
+      options: { data: { full_name }, emailRedirectTo: authRedirect("/auth/confirmed") },
     });
     if (error) throw error;
     state.authMode = "login";
@@ -575,11 +756,12 @@ root.addEventListener("submit", event => {
     else toast("Controleer je e-mail om je account te bevestigen. Daarna kun je inloggen.");
   });
   if (form.dataset.form === "forgot") run(async () => {
-    const { error } = await supa.auth.resetPasswordForEmail(String(values.email).trim(), { redirectTo: resetUrl() });
+    const { error } = await supa.auth.resetPasswordForEmail(String(values.email).trim(), { redirectTo: authRedirect("/auth/reset-password") });
     if (error) throw error;
     toast("Als dit e-mailadres een account heeft, ontvang je een mail met een herstel-link.");
   });
   if (form.dataset.form === "reset") run(async () => {
+    if (!state.recoveryReady) throw new Error("Open de geldige herstellink uit je e-mail opnieuw.");
     const password = String(values.password);
     if (password.length < 8) throw new Error("Gebruik minimaal 8 tekens voor je wachtwoord.");
     if (password !== String(values.password_confirm)) throw new Error("De wachtwoorden zijn niet gelijk.");
@@ -588,11 +770,12 @@ root.addEventListener("submit", event => {
     if (!session.data.session) throw new Error("Open de geldige herstel-link uit je e-mail opnieuw.");
     const { error } = await supa.auth.updateUser({ password });
     if (error) throw error;
+    state.authMode = "reset-success";
     const signOut = await supa.auth.signOut();
     if (signOut.error) throw signOut.error;
-    state.user = null; state.profile = null; state.data = null; state.authMode = "login";
-    clearResetUrl();
-    toast("Je wachtwoord is gewijzigd. Log in met je nieuwe wachtwoord.");
+    state.user = null; state.profile = null; state.data = null; state.recoveryReady = false;
+    clearAuthCallback();
+    render();
   });
   if (form.dataset.form === "profile") run(async () => {
     const full_name = String(values.full_name).trim();
@@ -655,16 +838,30 @@ root.addEventListener("submit", event => {
 });
 
 if (supa) supa.auth.onAuthStateChange((event) => {
-  if (event === "PASSWORD_RECOVERY") { state.authMode = "reset"; setTimeout(render, 0); }
+  if (event === "PASSWORD_RECOVERY") { state.recoveryReady = true; state.authMode = "reset"; setTimeout(() => bootstrap().catch(console.error), 0); }
   if (event === "SIGNED_OUT") {
     if (supportsPush()) pushRegistration().then(registration => registration.pushManager.getSubscription()).then(subscription => subscription?.unsubscribe()).catch(console.error);
-    state.user = null; state.profile = null; state.data = null; state.notificationPreferences = null; state.pushEnabled = false;
+    if (state.roomChannel) supa.removeChannel(state.roomChannel);
+    if (state.notificationChannel) supa.removeChannel(state.notificationChannel);
+    state.roomChannel = null; state.roomChannelId = null; state.notificationChannel = null;
+    state.user = null; state.profile = null; state.data = null; state.notifications = []; state.notificationPreferences = null; state.pushEnabled = false;
     if (state.authMode !== "reset") setTimeout(render, 0);
   }
-  if (event === "SIGNED_IN" && !state.user && state.authMode !== "reset") {
+  if (event === "SIGNED_IN" && !state.user && state.authMode !== "reset" && state.authMode !== "reset-success") {
     setTimeout(() => bootstrap().catch(console.error), 0);
   }
 });
 window.addEventListener("hashchange", render);
-if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("./sw.js").catch(console.error);
+window.addEventListener("popstate", render);
+navigator.serviceWorker?.addEventListener("message", event => {
+  if (event.data?.type !== "LIEF_NAVIGATE" || typeof event.data.url !== "string") return;
+  goPath(safeNotificationTarget(event.data.url));
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible" || !state.user) return;
+  loadNotifications().then(render).catch(console.error);
+  const route = currentRoute();
+  if (route.page === "room" && route.id) refreshTasks(route.id).catch(console.error);
+});
+if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(console.error);
 bootstrap().catch(error => { console.error(error); root.innerHTML = `<div class="crew-gateway"><h1>App kon niet starten</h1><p>${e(getError(error))}</p></div>`; });

@@ -1,3 +1,10 @@
 {
-  "outputDirectory": "."
+  "outputDirectory": ".",
+  "rewrites": [
+    { "source": "/auth/:path*", "destination": "/index.html" },
+    { "source": "/notifications", "destination": "/index.html" },
+    { "source": "/planning", "destination": "/index.html" },
+    { "source": "/my-shifts/:shiftId", "destination": "/index.html" },
+    { "source": "/events/:eventId/shifts/:shiftId", "destination": "/index.html" }
+  ]
 }

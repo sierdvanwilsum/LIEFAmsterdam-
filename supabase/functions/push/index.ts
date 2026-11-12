@@ -133,7 +133,7 @@ Deno.serve(async request => {
       if (subscriptions.error) throw subscriptions.error;
       if (!subscriptions.data?.length) return json({ error: "Schakel eerst meldingen in op dit apparaat." }, 400);
       const outcomes = await Promise.all((subscriptions.data as Subscription[]).map(item => deliver(item, {
-        title: "LIEF Crew testmelding", body: "Meldingen werken op dit apparaat.", url: "#profile",
+        title: "LIEF Crew testmelding", body: "Meldingen werken op dit apparaat.", url: "/notifications",
       })));
       if (!outcomes.some(Boolean)) return json({ error: "Verzenden mislukt. Controleer de Edge Function logs." }, 502);
       return json({ ok: true, delivered: outcomes.filter(Boolean).length });

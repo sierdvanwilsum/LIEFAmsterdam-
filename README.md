@@ -5,10 +5,11 @@ De bestaande HTML/CSS/JavaScript-stack is behouden. Met de ingevulde projectgege
 ## Lokaal starten
 
 ```sh
-python3 -m http.server 8765 --bind 127.0.0.1
+python3 dev-server.py
 ```
 
 Open `http://127.0.0.1:8765/`. Zolang `config.js` geen Supabase-projectgegevens bevat, kun je de app als medewerker of manager verkennen. Demowijzigingen verdwijnen bij herladen.
+Als poort 8765 al bezet is, start met `python3 dev-server.py 8766` en open poort 8766. E-maillinks verwijzen ook tijdens lokaal testen naar de gepubliceerde app.
 
 ## Supabase aansluiten
 
@@ -16,7 +17,7 @@ Open `http://127.0.0.1:8765/`. Zolang `config.js` geen Supabase-projectgegevens 
 2. Voer [`supabase/schema.sql`](supabase/schema.sql) alleen bij de eerste inrichting uit in de SQL Editor. Dit maakt de tabellen, RLS-beveiliging, private Storage-bucket en Realtime-publicatie voor taken. Voer het volledige schema niet opnieuw uit als de tabellen en policies al bestaan.
 3. Voer [`supabase/seed.sql`](supabase/seed.sql) uit als je de acht fictieve events en tien shifts wilt. Het script maakt geen accounts aan.
    Als je de seed eerder hebt uitgevoerd, voer dan ook [`supabase/update_gvb_events.sql`](supabase/update_gvb_events.sql) uit. Dit zet de vijf bestaande eventrecords op **GVB bedrijfsfeest** (de opbouwdag op **GVB bedrijfsfeest – opbouwdag**) en toont **Thema: Willy Wonka** apart. Het script werkt ook als je de vorige GVB-update al hebt uitgevoerd. Bestaande shifts, aanmeldingen en rollen blijven bestaan. De laatste `select` toont de aangepaste records.
-4. Stel onder **Authentication → URL Configuration** de lokale Site URL in op `http://127.0.0.1:8765/` en voeg `http://127.0.0.1:8765/` en `http://127.0.0.1:8765/?auth=recovery` toe aan de Redirect URLs. Voeg na publicatie ook de productie-URL's toe.
+4. Stel onder **Authentication → URL Configuration** de **Site URL** in op `https://liefamsterdam.vercel.app/`. Voeg als **Redirect URLs** exact `https://liefamsterdam.vercel.app/auth/confirmed` en `https://liefamsterdam.vercel.app/auth/reset-password` toe. Gebruik nooit een lokale URL als Site URL van het productieproject.
 5. Maak via **Account aanmaken** in de app een account met eigen naam, e-mailadres en wachtwoord. Bevestig het e-mailadres via de ontvangen mail. Nieuwe accounts krijgen door de databasetrigger altijd de rol `employee`.
 6. Promoveer uitsluitend een vertrouwde manager via de SQL Editor met diens Auth-gebruikers-ID uit **Authentication → Users**:
 
@@ -38,7 +39,7 @@ Het officiële logo uit `design-references/image copy Lief Logo 2.png` staat als
 
 De code en SQL voor push zijn aanwezig, maar **live push werkt pas na deze Supabase-stappen**:
 
-1. Voer [`supabase/notifications.sql`](supabase/notifications.sql) uit in de SQL Editor, na `schema.sql`. Dit voegt `push_subscriptions`, `notification_preferences`, `notifications`, concept/publicatie voor shifts en de database-triggers toe. Bestaande shifts blijven gepubliceerd.
+1. Voer [`supabase/notifications.sql`](supabase/notifications.sql) uit in de SQL Editor, na `schema.sql`. **Voer dit script opnieuw uit als push al eerder is ingericht**: het is herhaalbaar en voegt `read_at`, de inbox-RLS, Realtime voor meldingen en nieuwe doellinks aan bestaande installaties toe. Bestaande meldingen en shifts blijven bestaan.
 2. De publieke VAPID-sleutel staat in [`config.js`](config.js). De bijbehorende privésleutel en een willekeurig webhookgeheim zijn lokaal gegenereerd in `/private/tmp/lief-crew-push-secrets.env` met bestandsrechten `600`. Bewaar dit bestand veilig; deel de privésleutel of het webhookgeheim niet in chat, browsercode of Git. Bij een nieuwe computer moet je **dezelfde** VAPID-sleutels blijven gebruiken voor bestaande abonnementen.
 3. Koppel de Supabase CLI aan project `wwqyufcpwbrbjcglskko` en stel de vier secrets uit dit bestand in. Voer de commando's uit in de projectmap:
 
@@ -56,6 +57,17 @@ De code en SQL voor push zijn aanwezig, maar **live push werkt pas na deze Supab
 **Controleren:** klik als medewerker op **Stuur testmelding**. Een manager kan daarna een taak toewijzen, een medewerker bij een shift indelen en een nieuwe conceptshift met rollen publiceren. Elke actie maakt een rij in `notifications`; `delivery_state = sent` betekent dat de pushdienst de melding accepteerde. Een melding verschijnt alleen als de gebruiker push op het apparaat heeft ingeschakeld en de betreffende voorkeur aan staat. Bij problemen: controleer de Edge Function logs en de webhook-logs in Supabase.
 
 De voorkeuren voor nieuwe taken, nieuwe shifts, geaccepteerde of gewijzigde shifts, eventmededelingen en documenten staan per gebruiker in Supabase. Een manager kan een urgente taak aan alle ingeschreven crewleden van één shift melden via het selectievakje in het taakformulier. Een gewijzigde belangrijke mededeling in de shiftbriefing meldt ook de ingeschreven crew. Nieuwe shifts starten als concept en sturen pas bij **Publiceer shift** een melding.
+
+## Productie-URL en e-maillinks
+
+De app gebruikt voor alle e-maillinks de publieke productie-URL uit [`config.js`](config.js): `https://liefamsterdam.vercel.app`, ook wanneer iemand zich via een lokale ontwikkelserver registreert. Signup stuurt naar `/auth/confirmed`; wachtwoordherstel naar `/auth/reset-password`. De directe routes worden op Vercel via [`vercel.json`](vercel.json) naar de app geleid; lokaal doet `dev-server.py` dit.
+
+1. Zet in Supabase **Authentication → URL Configuration** de **Site URL** op `https://liefamsterdam.vercel.app/` en voeg de twee exacte productie-Redirect URLs uit stap 4 hierboven toe. Verwijder oude lokale of IP-adressen die je niet meer gebruikt. Supabase valt terug op de Site URL als de opgegeven redirect niet is toegestaan.
+2. Controleer **Authentication → Email Templates** voor *Confirm signup* en *Reset password*. Gebruik de standaard verificatielink `{{ .ConfirmationURL }}`. Verwijder hardcoded localhost/IP-links en zelfgebouwde links met `{{ .SiteURL }}` die de opgegeven `redirectTo` negeren. Als je een aangepaste template gebruikt, moet die de toegestane redirect volgen.
+3. Publiceer deze projectversie opnieuw op Vercel. Controleer in **Vercel → Project → Settings → Environment Variables** dat geen oude URL-variabele of buildstap `config.js` overschrijft. Deze statische app heeft geen servergeheim of aparte URL-variabele in Vercel nodig.
+4. Voer `supabase/notifications.sql` opnieuw uit en deploy de `push` Edge Function opnieuw. Nieuwe pushberichten openen de bijbehorende shift, taak of de meldingenpagina. Oude meldingen met hash-links blijven binnen de app werken.
+
+Test daarna op een telefoon met een nieuw medewerkeraccount: aanmelden, mail bevestigen, inloggen, herstelmail aanvragen, wachtwoord wijzigen en opnieuw inloggen. Test met een manager en medewerker tegelijk een nieuwe taak, de knop **Ververs**, de automatische update, een taakpush en een push zonder bestemming. Een live end-to-endtest vereist toegang tot beide accounts en de gepubliceerde Supabase/Vercel-configuratie.
 
 ## Huidige grenzen
 
