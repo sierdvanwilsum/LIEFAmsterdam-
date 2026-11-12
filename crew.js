@@ -164,9 +164,12 @@ function currentRoute() {
   if (parts[0] === "planning") return { page: "planning" };
   return { page: "home" };
 }
-function toast(message) { state.toast = message; render(); }
+function toast(message) {
+  state.toast = message;
+  render();
+  if (!state.profile) requestAnimationFrame(() => root.querySelector(".crew-auth-notice")?.scrollIntoView({ block: "nearest" }));
+}
 function getError(error) {
-  if (error?.name === "Error" && error.message) return error.message;
   if (error?.code === "23505") return "Dit onderdeel bestaat al.";
   if (/invalid login credentials/i.test(error?.message || "")) return "E-mailadres of wachtwoord klopt niet.";
   if (/email not confirmed/i.test(error?.message || "")) return "Bevestig eerst je e-mailadres.";
@@ -174,6 +177,8 @@ function getError(error) {
   if (/password should be at least|weak password/i.test(error?.message || "")) return "Kies een sterker wachtwoord van minimaal 8 tekens.";
   if (/user already registered/i.test(error?.message || "")) return "Dit e-mailadres heeft al een account. Log in of herstel je wachtwoord.";
   if (/rate limit|too many requests|over_email_send_rate_limit/i.test(`${error?.code || ""} ${error?.message || ""}`)) return "Er zijn te veel pogingen. Probeer het later opnieuw.";
+  if (/failed to fetch|networkerror|network request failed/i.test(error?.message || "")) return "Geen verbinding met Supabase. Controleer je internetverbinding en probeer opnieuw.";
+  if (error?.name === "Error" && error.message) return error.message;
   return "Er is iets misgegaan. Probeer opnieuw.";
 }
 async function run(work) {
@@ -181,6 +186,16 @@ async function run(work) {
   state.busy = true;
   try { await work(); } catch (error) { console.error(error); toast(getError(error)); }
   finally { state.busy = false; }
+}
+function runAuthSubmit(form, pendingLabel, work) {
+  const button = form.querySelector('button[type="submit"]');
+  const label = button.querySelector("span");
+  const originalLabel = label.textContent;
+  button.disabled = true;
+  label.textContent = pendingLabel;
+  return run(work).finally(() => {
+    if (button.isConnected) { button.disabled = false; label.textContent = originalLabel; }
+  });
 }
 
 async function loadData() {
@@ -304,16 +319,17 @@ function empty(title, description, action = "", label = "") { return `<div class
 
 function gateway() {
   const mode = state.authMode;
-  const titles = { login: "Welkom bij de crew.", signup: "Maak je account.", forgot: "Wachtwoord vergeten?", reset: "Kies een nieuw wachtwoord.", "reset-loading": "Herstellink controleren.", "reset-invalid": "Herstellink verlopen.", "reset-success": "Wachtwoord aangepast", "confirmed-loading": "Bevestiging controleren.", confirmed: "E-mailadres bevestigd", "confirmed-error": "Bevestigingslink ongeldig." };
-  const descriptions = { login: "Planning, taken en alle informatie voor jouw event op één plek.", signup: "Meld je aan met je eigen e-mailadres. Je begint als medewerker.", forgot: "Vul je e-mailadres in. Als er een account bestaat, ontvang je een herstelmail.", reset: "Vul een nieuw wachtwoord in voor je account.", "reset-loading": "Even geduld terwijl we je herstellink controleren.", "reset-invalid": "Vraag een nieuwe herstellink aan via Wachtwoord vergeten.", "reset-success": "Je kunt nu opnieuw inloggen.", "confirmed-loading": "Even geduld terwijl we je e-mailadres controleren.", confirmed: "Je account is klaar voor gebruik.", "confirmed-error": "Ga terug naar inloggen of neem contact op met LIEF." };
+  const titles = { login: "Welkom bij de crew.", signup: "Maak je account.", resend: "Bevestigingsmail opnieuw sturen.", forgot: "Wachtwoord vergeten?", reset: "Kies een nieuw wachtwoord.", "reset-loading": "Herstellink controleren.", "reset-invalid": "Herstellink verlopen.", "reset-success": "Wachtwoord aangepast", "confirmed-loading": "Bevestiging controleren.", confirmed: "E-mailadres bevestigd", "confirmed-error": "Bevestigingslink ongeldig." };
+  const descriptions = { login: "Planning, taken en alle informatie voor jouw event op één plek.", signup: "Meld je aan met je eigen e-mailadres. Je begint als medewerker.", resend: "Vul je e-mailadres in om een nieuwe bevestigingsmail aan te vragen.", forgot: "Vul je e-mailadres in. Als er een account bestaat, ontvang je een herstelmail.", reset: "Vul een nieuw wachtwoord in voor je account.", "reset-loading": "Even geduld terwijl we je herstellink controleren.", "reset-invalid": "Vraag een nieuwe herstellink aan via Wachtwoord vergeten.", "reset-success": "Je kunt nu opnieuw inloggen.", "confirmed-loading": "Even geduld terwijl we je e-mailadres controleren.", confirmed: "Je account is klaar voor gebruik.", "confirmed-error": "Ga terug naar inloggen of neem contact op met LIEF." };
   const emailInput = `<label>E-mailadres<input name="email" type="email" autocomplete="email" required /></label>`;
   const passwordInput = `<label>Wachtwoord<input name="password" type="password" autocomplete="current-password" required /></label>`;
   const newPasswordInputs = `<label>Nieuw wachtwoord<input name="password" type="password" autocomplete="new-password" minlength="8" required /></label><label>Herhaal wachtwoord<input name="password_confirm" type="password" autocomplete="new-password" minlength="8" required /></label>`;
   const submit = label => `<button type="submit" class="crew-button primary"><span>${label}</span><span class="crew-button-icon">${icon("arrow", 17)}</span></button>`;
   const link = (label, target) => `<button type="button" class="crew-auth-link" data-action="auth-mode" data-id="${target}">${label}</button>`;
   const forms = {
-    login: `<form data-form="login" class="crew-form">${emailInput}${passwordInput}${submit("Inloggen")}</form><div class="crew-auth-links">${link("Account aanmaken", "signup")}${link("Wachtwoord vergeten?", "forgot")}</div>`,
-    signup: `<form data-form="signup" class="crew-form"><label>Volledige naam<input name="full_name" type="text" autocomplete="name" maxlength="100" required /></label>${emailInput}${newPasswordInputs}${submit("Account aanmaken")}</form><div class="crew-auth-links">${link("Ik heb al een account", "login")}</div>`,
+    login: `<form data-form="login" class="crew-form">${emailInput}${passwordInput}${submit("Inloggen")}</form><div class="crew-auth-links">${link("Account aanmaken", "signup")}${link("Wachtwoord vergeten?", "forgot")}${link("Bevestigingsmail opnieuw", "resend")}</div>`,
+    signup: `<form data-form="signup" class="crew-form"><label>Volledige naam<input name="full_name" type="text" autocomplete="name" maxlength="100" required /></label>${emailInput}${newPasswordInputs}${submit("Account aanmaken")}</form><div class="crew-auth-links">${link("Ik heb al een account", "login")}${link("Bevestigingsmail opnieuw", "resend")}</div>`,
+    resend: `<form data-form="resend" class="crew-form">${emailInput}${submit("Mail opnieuw sturen")}</form><div class="crew-auth-links">${link("Terug naar inloggen", "login")}</div>`,
     forgot: `<form data-form="forgot" class="crew-form">${emailInput}${submit("Stuur herstelmail")}</form><div class="crew-auth-links">${link("Terug naar inloggen", "login")}</div>`,
     reset: `<form data-form="reset" class="crew-form">${newPasswordInputs}${submit("Wachtwoord opslaan")}</form><div class="crew-auth-links">${link("Terug naar inloggen", "login")}</div>`,
     "reset-loading": "",
@@ -324,7 +340,8 @@ function gateway() {
     confirmed: `${button("Naar inloggen", "auth-login")}`,
   };
   const managerNote = ["login", "signup"].includes(mode) ? '<p class="crew-gateway-note">Managerrechten worden door LIEF toegekend.</p>' : "";
-  return `<div class="crew-gateway"><div class="crew-gateway-card">${logo()}<span class="eyebrow">LIEF AMSTERDAM · INTERNE CREW APP</span><h1>${configured ? titles[mode] : titles.login}</h1><p>${configured ? descriptions[mode] : descriptions.login}</p>${state.toast ? `<p class="crew-auth-notice" role="status">${e(state.toast)}</p>` : ""}${configured ? `${forms[mode] || ""}${managerNote}` : `<div class="crew-demo-options">${button("Bekijk als medewerker", "demo-employee")}${button("Bekijk als manager", "demo-manager", "", "secondary")}</div><p class="crew-gateway-note">Demomodus met fictieve gegevens. Vul config.js in om Supabase te gebruiken.</p>`}</div></div>`;
+  const notice = state.toast ? `<p class="crew-auth-notice" role="status">${e(state.toast)}</p>` : "";
+  return `<div class="crew-gateway"><div class="crew-gateway-card">${logo()}<span class="eyebrow">LIEF AMSTERDAM · INTERNE CREW APP</span><h1>${configured ? titles[mode] : titles.login}</h1><p>${configured ? descriptions[mode] : descriptions.login}</p>${configured ? `${forms[mode] || ""}${notice}${managerNote}` : `<div class="crew-demo-options">${button("Bekijk als medewerker", "demo-employee")}${button("Bekijk als manager", "demo-manager", "", "secondary")}</div>${notice}<p class="crew-gateway-note">Demomodus met fictieve gegevens. Vul config.js in om Supabase te gebruiken.</p>`}</div></div>`;
 }
 
 function shiftCard(shift, options = {}) {
@@ -730,6 +747,19 @@ root.addEventListener("change", event => {
   });
 });
 
+root.addEventListener("invalid", event => {
+  const form = event.target.closest(".crew-gateway-card form[data-form]");
+  if (!form) return;
+  let notice = form.querySelector(".crew-auth-notice");
+  if (!notice) {
+    notice = document.createElement("p");
+    notice.className = "crew-auth-notice";
+    notice.setAttribute("role", "alert");
+    form.querySelector('button[type="submit"]').before(notice);
+  }
+  notice.textContent = event.target.validity.typeMismatch ? "Vul een geldig e-mailadres in." : event.target.validity.tooShort ? "Gebruik minimaal 8 tekens voor je wachtwoord." : "Vul alle verplichte velden in.";
+}, true);
+
 root.addEventListener("submit", event => {
   const form = event.target.closest("form[data-form]");
   if (!form) return;
@@ -740,20 +770,29 @@ root.addEventListener("submit", event => {
     if (error) throw error;
     await bootstrap();
   });
-  if (form.dataset.form === "signup") run(async () => {
-    const full_name = String(values.full_name).trim();
-    const password = String(values.password);
-    if (!full_name) throw new Error("Vul je naam in.");
-    if (password.length < 8) throw new Error("Gebruik minimaal 8 tekens voor je wachtwoord.");
-    if (password !== String(values.password_confirm)) throw new Error("De wachtwoorden zijn niet gelijk.");
-    const { data, error } = await supa.auth.signUp({
-      email: String(values.email).trim(), password,
-      options: { data: { full_name }, emailRedirectTo: authRedirect("/auth/confirmed") },
+  if (form.dataset.form === "signup") runAuthSubmit(form, "Account aanmaken…", async () => {
+      const full_name = String(values.full_name).trim();
+      const password = String(values.password);
+      if (!full_name) throw new Error("Vul je naam in.");
+      if (password.length < 8) throw new Error("Gebruik minimaal 8 tekens voor je wachtwoord.");
+      if (password !== String(values.password_confirm)) throw new Error("De wachtwoorden zijn niet gelijk.");
+      const { data, error } = await supa.auth.signUp({
+        email: String(values.email).trim(), password,
+        options: { data: { full_name }, emailRedirectTo: authRedirect("/auth/confirmed") },
+      });
+      if (error) throw error;
+      state.authMode = "login";
+      if (data.session) await bootstrap();
+      else toast("Controleer je e-mail, ook de spammap, om je account te bevestigen. Ontvang je niets? Neem contact op met LIEF.");
+  });
+  if (form.dataset.form === "resend") runAuthSubmit(form, "Mail versturen…", async () => {
+    const { error } = await supa.auth.resend({
+      type: "signup",
+      email: String(values.email).trim(),
+      options: { emailRedirectTo: authRedirect("/auth/confirmed") },
     });
     if (error) throw error;
-    state.authMode = "login";
-    if (data.session) await bootstrap();
-    else toast("Controleer je e-mail om je account te bevestigen. Daarna kun je inloggen.");
+    toast("Als dit e-mailadres op bevestiging wacht, ontvang je een nieuwe mail. Controleer ook de spammap.");
   });
   if (form.dataset.form === "forgot") run(async () => {
     const { error } = await supa.auth.resetPasswordForEmail(String(values.email).trim(), { redirectTo: authRedirect("/auth/reset-password") });

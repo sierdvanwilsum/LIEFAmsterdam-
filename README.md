@@ -29,7 +29,7 @@ Als poort 8765 al bezet is, start met `python3 dev-server.py 8766` en open poort
 
 7. Log in met het account. Gebruik nooit een `service_role` of `sb_secret_...` key in browsercode.
 
-**E-mail voor medewerkers:** Supabase verstuurt via de standaard maildienst alleen naar e-mailadressen van projectteamleden en heeft een lage verzendlimiet. Configureer onder Authentication een eigen SMTP-server voordat medewerkers buiten het projectteam registratie- en herstelmails moeten ontvangen. Deel SMTP-wachtwoorden niet in de app of chat.
+**E-mail voor medewerkers:** Supabase verstuurt via de standaard maildienst alleen naar e-mailadressen van projectteamleden en heeft een lage verzendlimiet. Configureer onder **Authentication → SMTP Settings** een eigen SMTP-server voordat medewerkers buiten het projectteam registratie- en herstelmails moeten ontvangen. Na het instellen kan een medewerker op het inlogscherm **Bevestigingsmail opnieuw** kiezen voor een account dat nog niet is bevestigd. Deel SMTP-wachtwoorden niet in de app of chat. Zie de [Supabase-documentatie over e-mailverzending](https://supabase.com/docs/guides/auth/auth-smtp).
 
 De app toont alleen medewerkerfuncties aan medewerkers. Managers krijgen daarnaast event-, shift-, rol-, crew-, taken- en documentenbeheer. Eventruimtes, taken en bestanden worden in Supabase door RLS afgeschermd per shift.
 
