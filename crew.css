@@ -1,9 +1,9 @@
 /* De bestaande design tokens in styles.css blijven de visuele basis. */
-html { min-width: 320px; }
-body { min-width: 320px; }
+html { min-width: 0; max-width: 100%; overflow-x: clip; }
+body { min-width: 0; max-width: 100%; overflow-x: clip; }
 textarea { font: inherit; }
 a:focus-visible, textarea:focus-visible { outline: 3px solid #6b41bc; outline-offset: 3px; }
-.crew-shell { min-height: 100vh; padding: 0 16px 108px; background: var(--lilac); }
+.crew-shell { min-height: 100vh; min-height: 100dvh; padding: 0 max(16px, env(safe-area-inset-right)) calc(108px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); background: var(--lilac); }
 .crew-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 1380px; min-height: 92px; margin: auto; border-bottom: 1px solid rgba(10,10,10,.13); }
 .crew-brand { display: flex; align-items: center; gap: 9px; min-width: 0; color: var(--ink); text-decoration: none; }
 .crew-logo { display: block; flex: none; width: 64px; height: 64px; object-fit: contain; border-radius: 15px; background: white; box-shadow: 0 7px 20px rgba(37,18,64,.08); }
@@ -96,6 +96,9 @@ a:focus-visible, textarea:focus-visible { outline: 3px solid #6b41bc; outline-of
 .crew-home-hero h1 { max-width: 650px; margin: 12px 0; font: 700 clamp(40px,9vw,76px)/.99 var(--serif); letter-spacing: -.065em; }
 .crew-home-hero h1 em { font-weight: 600; }
 .crew-home-actions { display: grid; gap: 9px; margin-top: 25px; }
+.crew-home-shortcuts { display: grid; gap: 8px; margin-top: 12px; }
+.crew-home-shortcuts a { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 52px; padding: 12px 17px; border-radius: 18px; color: var(--ink); background: white; font-size: 12px; font-weight: 800; text-decoration: none; }
+.crew-home-shortcuts a:hover { background: var(--lime); }
 .crew-home-grid { display: grid; gap: 25px; margin-top: 26px; }
 .crew-info-card { padding: 22px; border-radius: 26px; background: var(--ink); color: white; }
 .crew-info-card.accent { color: var(--ink); background: var(--lime); }
@@ -264,6 +267,40 @@ a:focus-visible, textarea:focus-visible { outline: 3px solid #6b41bc; outline-of
 .crew-manage-crew select { width: 145px; min-height: 38px; font-size: 10px; }
 .crew-manage-crew p { color: var(--muted); font-size: 12px; }
 .crew-manage-shift > .crew-button { width: 100%; }
+.crew-manager-actions { display: grid; gap: 10px; margin: 6px 0 24px; }
+.crew-manager-actions .crew-button { width: 100%; min-height: 62px; }
+.crew-manager-actions .crew-button:first-child { min-height: 70px; font-size: 14px; }
+.crew-new-role-list { display: grid; gap: 8px; }
+.crew-new-role-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px; gap: 8px; align-items: end; }
+.crew-new-role-row .crew-small-button { grid-column: 1 / -1; }
+.crew-create-form { width: 100%; max-width: 800px; }
+.crew-file-drop { position: relative; display: grid; justify-items: center; gap: 8px; padding: 20px; border: 2px dashed #9a79d2; border-radius: 20px; background: var(--lilac-soft); text-align: center; }
+.crew-file-drop.dragging { border-color: var(--ink); background: var(--lime); }
+.crew-file-drop strong { font: 700 20px var(--serif); }
+.crew-file-drop span, .crew-file-name { color: var(--muted); font-size: 12px; }
+.crew-file-drop input[type=file] { position: absolute; width: 1px; height: 1px; padding: 0; opacity: 0; pointer-events: none; }
+.crew-file-name { margin: 0; overflow-wrap: anywhere; }
+.crew-shift-extra { margin-top: 8px; }
+.crew-shift-extra .crew-button { width: 100%; }
+.crew-past-title, .crew-manager-feedback { margin-top: 32px; }
+.crew-feedback h3 { margin: 0; font: 700 21px var(--serif); }
+.crew-heart { width: 54px; height: 54px; border: 0; border-radius: 50%; background: var(--lilac-soft); color: var(--ink); font-size: 28px; cursor: pointer; transition: transform .2s, background .2s; }
+.crew-heart.active { background: var(--lime); transform: scale(1.12); animation: crew-heart-pop .26s ease-out; }
+.crew-heart-logo { display: block; width: 54px; height: 54px; background: url('/design-references/image copy Lief Logo 2.png') center -35px / 160px 160px no-repeat; }
+@keyframes crew-heart-pop { 50% { transform: scale(1.22); } }
+.crew-market-card h2 { margin-top: 8px; }
+.crew-market-card .crew-button { width: 100%; margin-top: 8px; }
+@media (max-width: 619px) {
+  .crew-form input, .crew-form select, .crew-form textarea, .crew-add-role input, .crew-assign select, .crew-manage-crew select, .crew-role-row input { font-size: 16px; }
+  .crew-form-pair { grid-template-columns: minmax(0,1fr); }
+  .crew-header { gap: 5px; }
+  .crew-header-end { gap: 6px; }
+  .crew-brand-copy { display: none; }
+  .crew-shell { padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
+}
+@media (min-width: 620px) { .crew-manager-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 620px) { .crew-home-shortcuts { grid-template-columns: repeat(3, minmax(0,1fr)); } }
+@media (min-width: 1000px) { .crew-manager-actions { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 
 @media (max-width: 359px) {
   .crew-brand-copy small { display: none; }

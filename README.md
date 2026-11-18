@@ -40,6 +40,7 @@ Het officiële logo uit `design-references/image copy Lief Logo 2.png` staat als
 De code en SQL voor push zijn aanwezig, maar **live push werkt pas na deze Supabase-stappen**:
 
 1. Voer [`supabase/notifications.sql`](supabase/notifications.sql) uit in de SQL Editor, na `schema.sql`. **Voer dit script opnieuw uit als push al eerder is ingericht**: het is herhaalbaar en voegt `read_at`, de inbox-RLS, Realtime voor meldingen en nieuwe doellinks aan bestaande installaties toe. Bestaande meldingen en shifts blijven bestaan.
+   Voer daarna [`supabase/crew-ux.sql`](supabase/crew-ux.sql) uit. Dit voegt veilige dienstenruilen, feedback, shiftlocaties, taakdeadlines en bestandscontrole toe. Het script breidt de Realtime-publicatie uit; bestaande data blijft staan. Voer `schema.sql` niet opnieuw uit.
 2. De publieke VAPID-sleutel staat in [`config.js`](config.js). De bijbehorende privésleutel en een willekeurig webhookgeheim zijn lokaal gegenereerd in `/private/tmp/lief-crew-push-secrets.env` met bestandsrechten `600`. Bewaar dit bestand veilig; deel de privésleutel of het webhookgeheim niet in chat, browsercode of Git. Bij een nieuwe computer moet je **dezelfde** VAPID-sleutels blijven gebruiken voor bestaande abonnementen.
 3. Koppel de Supabase CLI aan project `wwqyufcpwbrbjcglskko` en stel de vier secrets uit dit bestand in. Voer de commando's uit in de projectmap:
 
@@ -76,3 +77,4 @@ Test daarna op een telefoon met een nieuw medewerkeraccount: aanmelden, mail bev
 - Bestanden in de demomodus zijn alleen tijdens de huidige browsersessie beschikbaar. In Supabase worden ze in de private bucket `crew-documents` opgeslagen.
 - De bestaande mock planner staat nog in `app.js`; de nieuwe app gebruikt `crew.js` als hoofdingang.
 - Zonder uitgevoerde `notifications.sql`, gedeployde `push` Edge Function en ingestelde webhook werken de bestaande planning en eventruimtes wel, maar worden geen pushmeldingen afgeleverd.
+- Voor de nieuwe dienstenmarktplaats, feedback, bestandsdeduplicatie en taakdeadlines moet `supabase/crew-ux.sql` in de SQL Editor zijn uitgevoerd. De app toont anders bij opslaan een duidelijke databasefout.

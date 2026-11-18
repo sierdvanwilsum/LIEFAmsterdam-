@@ -76,5 +76,5 @@ function makeDemoData() {
     { id: "doc-1", shift_id: shifts[1].id, event_id: shifts[1].event_id, title: "DAY1 – Draaiboek", file_type: "Draaiboek", mime_type: "text/plain", file_url: "", uploaded_by: "demo-manager", created_at: new Date().toISOString(), demo_text: "DAY1 – Draaiboek\nCrewbriefing 08:45\nOntvangst gasten 09:00\nAfsluiting 22:00" },
     { id: "doc-2", shift_id: shifts[3].id, event_id: shifts[3].event_id, title: "GVB bedrijfsfeest – briefing", file_type: "Briefing", mime_type: "text/plain", file_url: "", uploaded_by: "demo-manager", created_at: new Date().toISOString(), demo_text: "GVB bedrijfsfeest – briefing\nThema: Willy Wonka.\nCheck in bij de crewbalie en lees de mededelingen in de eventruimte." },
   ];
-  return { profiles, events, shifts, shift_roles, shift_signups, tasks, documents };
+  return { profiles, events, shifts, shift_roles, shift_signups, tasks, documents, shift_swaps: [], shift_feedback: [] };
 }

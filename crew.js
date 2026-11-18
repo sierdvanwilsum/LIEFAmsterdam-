@@ -8,7 +8,7 @@ const configured = Boolean(supaConfig.url && supaConfig.publishableKey);
 const supa = configured && window.supabase ? window.supabase.createClient(supaConfig.url, supaConfig.publishableKey) : null;
 const roleNames = ["Bar", "Runner", "Debras", "Opbouw", "Afbouw", "Productie", "Garderobe", "Hospitality", "Oempa Loempa", "Routing", "Entertainment support", "Anders"];
 const documentTypes = ["Draaiboek", "Factsheet", "Plattegrond", "Briefing", "Overig"];
-const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: location.pathname === "/auth/reset-password" ? "reset-loading" : location.pathname === "/auth/confirmed" ? "confirmed-loading" : "login", recoveryReady: false, filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, roomChannel: null, roomChannelId: null, taskRefreshing: false, taskRefreshId: null, taskRefreshPromise: null, showEventForm: false, notificationPreferences: null, notificationError: "", notifications: [], notificationsError: "", notificationChannel: null, pushEnabled: false };
+const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: location.pathname === "/auth/reset-password" ? "reset-loading" : location.pathname === "/auth/confirmed" ? "confirmed-loading" : "login", recoveryReady: false, filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, offeringShift: null, roomChannel: null, roomChannelId: null, taskRefreshing: false, taskRefreshId: null, taskRefreshPromise: null, showEventForm: false, managerAction: "", managerEvent: "", managerShift: "", notificationPreferences: null, notificationError: "", notifications: [], notificationsError: "", notificationChannel: null, dataChannel: null, dataRefreshTimer: null, refreshing: false, uploadBusy: false, uploadFile: null, uploadForm: null, pushEnabled: false };
 const notificationChoices = [
   ["new_tasks", "Nieuwe taken"], ["new_shifts", "Nieuwe shifts"],
   ["shift_accepted", "Shift geaccepteerd"], ["shift_changed", "Shift gewijzigd"],
@@ -53,7 +53,8 @@ async function loadNotifications() {
   if (!supa || !state.user) return;
   const result = await supa.from("notifications").select("id,category,title,body,target_url,created_at,read_at").eq("user_id", state.user.id).order("created_at", { ascending: false });
   if (result.error) {
-    state.notificationsError = "Meldingen kunnen nog niet worden geladen. Voer de inbox-migratie uit in Supabase.";
+    state.notificationsError = "Meldingen kunnen nog niet worden geladen. Controleer notifications.sql in Supabase.";
+    state.notifications = [];
     return;
   }
   state.notificationsError = "";
@@ -64,7 +65,19 @@ function startNotificationChannel() {
   if (!supa || !state.user || state.notificationChannel) return;
   state.notificationChannel = supa.channel(`crew-notifications-${state.user.id}`)
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${state.user.id}` }, () => loadNotifications().then(render).catch(console.error))
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "notifications", filter: `user_id=eq.${state.user.id}` }, () => loadNotifications().then(render).catch(console.error))
     .subscribe();
+}
+function startDataChannel() {
+  if (!supa || !state.user || state.dataChannel) return;
+  let channel = supa.channel(`crew-data-${state.user.id}`);
+  for (const table of ["tasks", "documents", "shifts", "shift_roles", "shift_signups", "shift_swaps", "shift_feedback"]) {
+    for (const event of ["INSERT", "UPDATE"]) channel = channel.on("postgres_changes", { event, schema: "public", table }, () => {
+      clearTimeout(state.dataRefreshTimer);
+      state.dataRefreshTimer = setTimeout(() => refresh().catch(console.error), 180);
+    });
+  }
+  state.dataChannel = channel.subscribe();
 }
 function safeNotificationTarget(value) {
   if (typeof value !== "string" || !value) return "/notifications";
@@ -112,6 +125,12 @@ function dayNumber(value) { return dateText(value, { day: "2-digit" }); }
 function monthShort(value) { return dateText(value, { month: "short" }).replace(".", "").toUpperCase(); }
 function timeText(value) { return String(value || "").slice(0, 5); }
 function shiftTime(s) { return `${timeText(s.start_time)} — ${timeText(s.end_time)}`; }
+function shiftEnd(shift) {
+  const end = new Date(`${shift.date}T${timeText(shift.end_time)}:00`);
+  if (timeText(shift.end_time) <= timeText(shift.start_time)) end.setDate(end.getDate() + 1);
+  return end;
+}
+function isCompleted(shift) { return shiftEnd(shift).getTime() < Date.now(); }
 function isManager() { return state.profile?.role === "manager"; }
 function firstName() { return state.profile?.full_name?.trim().split(/\s+/)[0] || "collega"; }
 function profile(id) { return state.data?.profiles.find(p => p.id === id); }
@@ -128,6 +147,7 @@ function assignedOf(id) { return state.data?.occupancy.find(item => item.shift_i
 function roleAssigned(id, name) { return state.data?.role_occupancy.find(item => item.shift_id === id && item.role_name === name)?.assigned_count || 0; }
 function openOf(shift) { return Math.max(0, shift.required_people - assignedOf(shift.id)); }
 function shiftStatus(shift) {
+  if (isCompleted(shift)) return ["Afgerond", "soft"];
   if (shift.published === false) return ["Concept", "pending"];
   const count = occupancyOf(shift.id);
   if (shift.required_people === 0) return ["Rollen ontbreken", "closed"];
@@ -171,6 +191,7 @@ function toast(message) {
 }
 function getError(error) {
   if (error?.code === "23505") return "Dit onderdeel bestaat al.";
+  if (["42P01", "42703", "PGRST204", "PGRST205"].includes(error?.code)) return "De nieuwe database-onderdelen ontbreken nog. Voer crew-ux.sql uit in Supabase.";
   if (/invalid login credentials/i.test(error?.message || "")) return "E-mailadres of wachtwoord klopt niet.";
   if (/email not confirmed/i.test(error?.message || "")) return "Bevestig eerst je e-mailadres.";
   if (/email_address_not_authorized|email address not authorized/i.test(`${error?.code || ""} ${error?.message || ""}`)) return "Dit e-mailadres kan nog geen mail ontvangen. Vraag de beheerder om de e-mailinstellingen te controleren.";
@@ -212,8 +233,21 @@ async function loadData() {
   state.data = Object.fromEntries(tables.map((table, index) => [table, results[index].data || []]));
   state.data.occupancy = results[tables.length].data || [];
   state.data.role_occupancy = results[tables.length + 1].data || [];
+  const extra = await Promise.all([supa.from("shift_swaps").select("*"), supa.from("shift_feedback").select("*")]);
+  state.data.shift_swaps = extra[0].error ? [] : extra[0].data || [];
+  state.data.shift_feedback = extra[1].error ? [] : extra[1].data || [];
 }
 async function refresh() { await loadData(); render(); }
+async function refreshCurrent() {
+  if (state.refreshing) return;
+  state.refreshing = true;
+  const button = document.querySelector('[data-action="refresh-page"]');
+  if (button) { button.disabled = true; button.querySelector("span").textContent = "Verversen…"; }
+  try { await Promise.all([loadData(), loadNotifications()]); render(); }
+  catch (error) { console.error(error); toast(`Verversen mislukt: ${getError(error)}`); }
+  finally { state.refreshing = false; }
+}
+function refreshButton() { return `<button type="button" class="crew-refresh-button" data-action="refresh-page" aria-label="Gegevens verversen" ${state.refreshing ? "disabled" : ""}>${icon("refresh", 18)}<span>${state.refreshing ? "Verversen…" : "Ververs"}</span></button>`; }
 function orderedTasks(shiftId) {
   return tasksOf(shiftId).sort((a, b) => ({ urgent: 0, belangrijk: 1, normaal: 2 }[a.priority] - { urgent: 0, belangrijk: 1, normaal: 2 }[b.priority]) || ({ "te doen": 0, bezig: 1, klaar: 2 }[a.status] - { "te doen": 0, bezig: 1, klaar: 2 }[b.status]));
 }
@@ -300,6 +334,7 @@ async function bootstrap() {
   await loadNotificationSettings();
   await loadNotifications();
   startNotificationChannel();
+  startDataChannel();
   if (location.pathname === "/" && !location.hash && isManager()) go("manager");
   else render();
 }
@@ -358,12 +393,13 @@ function homePage() {
   const own = upcomingShifts().filter(shift => mySignup(shift.id)?.available);
   const next = own[0];
   const urgent = state.data.tasks.filter(task => task.priority === "urgent" && task.status !== "klaar" && canRoom(task.shift_id));
-  return shell(`<div class="crew-home-hero"><span class="eyebrow">GOED OM JE TE ZIEN, ${e(firstName().toUpperCase())}</span><h1>Jouw volgende<br><em>event.</em></h1><div class="crew-home-actions">${button("Bekijk planning", "go", "planning")}</div></div><div class="crew-home-grid"><section><div class="crew-section-head"><h2>Jouw volgende shift</h2><a href="#shifts">Alle shifts ${icon("arrow", 15)}</a></div>${next ? shiftCard(next, { room: true }) : empty("Nog geen shift gepland", "Bekijk de planning en meld je aan voor een shift.", "planning", "Bekijk planning")}</section><section><div class="crew-section-head"><h2>Nu belangrijk</h2><a href="#rooms">Eventruimtes ${icon("arrow", 15)}</a></div>${urgent.length ? urgent.slice(0, 3).map(task => taskCard(task, true)).join("") : `<div class="crew-info-card"><h3>Geen urgente taken.</h3><p>Nieuwe taken voor jouw shifts verschijnen hier.</p></div>`}</section></div>`, "home");
+  const availableCount = upcomingShifts().filter(shift => !mySignup(shift.id)?.available && occupancyOf(shift.id) < shift.required_people).length;
+  return shell(`<div class="crew-home-hero"><span class="eyebrow">GOED OM JE TE ZIEN, ${e(firstName().toUpperCase())}</span><h1>Jouw volgende<br><em>event.</em></h1><div class="crew-home-actions">${button("Bekijk planning", "go", "planning")}${refreshButton()}</div></div><div class="crew-home-shortcuts"><a href="#planning">${availableCount} beschikbare shifts ${icon("arrow",15)}</a><a href="#${next ? `room/${next.id}/documenten` : "rooms"}">${next ? `${docsOf(next.id).length} documenten` : "Documenten"} ${icon("arrow",15)}</a><a href="/notifications">Meldingen ${icon("bell",15)}</a></div><div class="crew-home-grid"><section><div class="crew-section-head"><h2>Jouw volgende shift</h2><a href="#shifts">Alle shifts ${icon("arrow", 15)}</a></div>${next ? shiftCard(next, { room: true }) : empty("Nog geen shift gepland", "Bekijk de planning en meld je aan voor een shift.", "planning", "Bekijk planning")}</section><section><div class="crew-section-head"><h2>Nu belangrijk</h2><a href="#rooms">Eventruimtes ${icon("arrow", 15)}</a></div>${urgent.length ? urgent.slice(0, 3).map(task => taskCard(task, true)).join("") : `<div class="crew-info-card"><h3>Geen urgente taken.</h3><p>Nieuwe taken voor jouw shifts verschijnen hier.</p></div>`}</section></div>`, "home");
 }
 
 function planningPage() {
   const list = upcomingShifts().filter(shift => state.filter === "alles" || state.filter === "mijn" && mySignup(shift.id)?.available || state.filter === "vrij" && occupancyOf(shift.id) < shift.required_people);
-  return shell(`${heading("CREWPLANNING", "Kies jouw shift.", "Alle aankomende events en diensten op één plek.")}<div class="crew-filter-row">${[["alles", "Alle shifts"], ["vrij", "Beschikbaar"], ["mijn", "Mijn aanmeldingen"]].map(([id, label]) => `<button type="button" class="crew-filter ${state.filter === id ? "active" : ""}" data-action="filter" data-id="${id}">${label}</button>`).join("")}</div><div class="crew-shift-grid">${list.length ? list.map(shift => shiftCard(shift)).join("") : empty("Geen shifts gevonden", "Kies een ander filter om meer shifts te zien.")}</div>`, "planning");
+  return shell(`${heading("CREWPLANNING", "Kies jouw shift.", "Alle aankomende events en diensten op één plek.")}<div class="crew-section-head">${refreshButton()}<a href="#marketplace">Dienstenmarktplaats ${icon("arrow", 15)}</a></div><div class="crew-filter-row">${[["alles", "Alle shifts"], ["vrij", "Beschikbaar"], ["mijn", "Mijn aanmeldingen"]].map(([id, label]) => `<button type="button" class="crew-filter ${state.filter === id ? "active" : ""}" data-action="filter" data-id="${id}">${label}</button>`).join("")}</div><div class="crew-shift-grid">${list.length ? list.map(shift => shiftCard(shift)).join("") : empty("Geen shifts gevonden", "Kies een ander filter om meer shifts te zien.")}</div>`, "planning");
 }
 
 function signupPage(shift) {
@@ -375,8 +411,19 @@ function signupPage(shift) {
 }
 
 function myShiftsPage() {
-  const own = upcomingShifts().filter(shift => mySignup(shift.id)?.available);
-  return shell(`${heading("PERSOONLIJK ROOSTER", "Mijn shifts", "Alle shifts waarvoor jij je hebt aangemeld.")}<div class="crew-shift-grid">${own.length ? own.map(shift => shiftCard(shift, { room: true })).join("") : empty("Nog geen shifts", "Meld je aan via de planning. Daarna staat je eventruimte hier klaar.", "planning", "Bekijk planning")}</div>`, "shifts");
+  const own = orderedShifts().filter(shift => mySignup(shift.id)?.available);
+  const future = own.filter(shift => !isCompleted(shift));
+  const past = own.filter(isCompleted).reverse();
+  return shell(`${heading("PERSOONLIJK ROOSTER", "Mijn shifts", "Alle diensten waarvoor jij je hebt aangemeld.")}<div class="crew-section-head"><h2>Aankomend</h2>${refreshButton()}</div><p><a class="crew-text-link" href="#marketplace">Bekijk dienstenmarktplaats ${icon("arrow", 15)}</a></p><div class="crew-shift-grid">${future.length ? future.map(shift => `<div>${shiftCard(shift, { room: true })}${mySignup(shift.id)?.assigned_role ? `<div class="crew-white-panel crew-shift-extra"><strong>Rol: ${e(mySignup(shift.id).assigned_role)}</strong>${!isManager() ? swapForShift(shift.id) ? `<p>Deze dienst staat op de marktplaats.</p>${button("Aanbod intrekken", "withdraw-swap", swapForShift(shift.id).id, "secondary")}` : state.offeringShift === shift.id ? `<form class="crew-form" data-form="offer-swap" data-id="${e(shift.id)}"><label>Opmerking <small>(optioneel)</small><textarea name="note" maxlength="300"></textarea></label><button type="submit" class="crew-button primary"><span>Dienst aanbieden</span><span class="crew-button-icon">${icon("arrow", 17)}</span></button></form>` : button("Dienst aanbieden", "show-offer", shift.id, "secondary") : ""}</div>` : ""}</div>`).join("") : empty("Nog geen aankomende shifts", "Bekijk de planning voor beschikbare diensten.", "planning", "Bekijk planning")}</div><div class="crew-section-head crew-past-title"><h2>Afgerond</h2></div><div class="crew-shift-grid">${past.length ? past.map(shift => `<div>${shiftCard(shift, { room: true })}<div class="crew-white-panel">${feedbackForm(shift)}</div></div>`).join("") : empty("Nog geen afgeronde shifts", "Na je eerste dienst kun je hier kort feedback geven.")}</div>`, "shifts");
+}
+function swapForShift(shiftId) { return state.data.shift_swaps?.find(x => x.shift_id === shiftId && x.from_user === state.user?.id && !["approved", "rejected", "withdrawn"].includes(x.status)); }
+function marketplacePage() {
+  const offers = (state.data.shift_swaps || []).filter(x => ["offered", "interested", "pending"].includes(x.status) && shiftOf(x.shift_id) && !isCompleted(shiftOf(x.shift_id)));
+  return shell(`<a class="crew-back" href="#planning">${icon("back", 16)} Terug naar planning</a>${heading("CREW", "Dienstenmarktplaats", "Een dienst overnemen kan pas na goedkeuring van de manager.")}<div class="crew-section-head"><h2>${offers.length} aangeboden</h2>${refreshButton()}</div><div class="crew-shift-grid">${offers.length ? offers.map(x => { const shift = shiftOf(x.shift_id), event = eventOf(shift); return `<article class="crew-white-panel crew-market-card"><span class="eyebrow">${e(dateText(shift.date))} · ${e(shiftTime(shift))}</span><h2>${e(event?.title || "Event")}</h2><p>Rol: <strong>${e(x.role)}</strong></p>${x.note ? `<p>${e(x.note)}</p>` : ""}${isManager() ? `<p>${e(nameOf(x.from_user))} → ${e(x.to_user ? nameOf(x.to_user) : "Nog geen vervanger")}</p>${x.to_user ? `${button("Ruil goedkeuren", "approve-swap", x.id)}${button("Afwijzen", "reject-swap", x.id, "secondary")}` : badge("Aangeboden", "pending")}` : x.from_user === state.user.id ? `${badge("Jouw aanbod", "soft")}${button("Aanbod intrekken", "withdraw-swap", x.id, "secondary")}` : x.to_user === state.user.id ? badge("Wacht op manager", "pending") : !x.to_user && !mySignup(shift.id)?.available ? button("Ik kan deze dienst overnemen", "interest-swap", x.id) : ""}</article>`; }).join("") : empty("Geen aangeboden diensten", "Nieuwe diensten verschijnen hier zodra een collega er een aanbiedt.")}</div>`, "planning");
+}
+function feedbackForm(shift) {
+  const item = state.data.shift_feedback?.find(x => x.shift_id === shift.id && x.user_id === state.user.id);
+  return `<form data-form="feedback" data-id="${e(shift.id)}" class="crew-form crew-feedback"><h3>Hoe was je shift?</h3><button type="button" class="crew-heart ${item?.liked ? "active" : ""}" data-action="toggle-heart" data-id="${e(shift.id)}" aria-label="${item?.liked ? "LIEF-hartje weghalen" : "LIEF-hartje geven"}" aria-pressed="${Boolean(item?.liked)}"><span class="crew-heart-logo" aria-hidden="true"></span></button><input type="hidden" name="liked" value="${Boolean(item?.liked)}"/><label>Korte reactie <small>(optioneel)</small><textarea name="text" maxlength="1000" placeholder="Wat ging goed of kan beter?">${e(item?.text || "")}</textarea></label><button class="crew-button primary" type="submit"><span>Feedback opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form>`;
 }
 
 function roomsPage() {
@@ -416,13 +463,13 @@ function notificationsPage() {
 function taskCard(task, compact = false) {
   const mine = task.assigned_to === state.user?.id;
   const detail = compact ? `<a class="crew-text-link" href="#room/${e(task.shift_id)}/taken">Bekijk taak ${icon("arrow", 15)}</a>` : `<div class="crew-task-actions">${!isManager() && !task.assigned_to && task.status !== "klaar" ? button("Claim taak", "claim-task", task.id) : ""}${!isManager() && mine && task.status === "te doen" ? button("Start taak", "start-task", task.id, "secondary") : ""}${!isManager() && mine && task.status !== "klaar" ? button("Afronden", "finish-task", task.id) : ""}${isManager() ? `<button type="button" class="crew-small-button" data-action="edit-task" data-id="${e(task.id)}">Wijzig</button><button type="button" class="crew-small-button danger" data-action="delete-task" data-id="${e(task.id)}">Verwijder</button>` : ""}</div>`;
-  return `<article id="task-${e(task.id)}" class="crew-task-card priority-${e(task.priority)}"><div class="crew-task-top">${badge(task.priority === "urgent" ? "Urgent" : task.priority === "belangrijk" ? "Belangrijk" : "Normaal", task.priority)}${badge(task.status === "klaar" ? "Klaar" : task.status === "bezig" ? "Bezig" : "Te doen", task.status === "klaar" ? "confirmed" : "soft")}</div><h3>${e(task.title)}</h3>${!compact && task.description ? `<p>${e(task.description)}</p>` : ""}<div class="crew-task-assignee">${icon("user", 15)}${task.assigned_to ? `Toegewezen aan: <strong>${e(nameOf(task.assigned_to))}</strong>` : "Nog niet toegewezen"}</div>${!compact ? `<div class="crew-task-meta">Aangemaakt door ${e(nameOf(task.created_by))} · ${e(dateTimeText(task.created_at))}${task.completed_at ? ` · Afgerond ${e(dateTimeText(task.completed_at))}` : ""}</div>` : ""}${detail}</article>`;
+  return `<article id="task-${e(task.id)}" class="crew-task-card priority-${e(task.priority)}"><div class="crew-task-top">${badge(task.priority === "urgent" ? "Urgent" : task.priority === "belangrijk" ? "Belangrijk" : "Normaal", task.priority)}${badge(task.status === "klaar" ? "Klaar" : task.status === "bezig" ? "Bezig" : "Te doen", task.status === "klaar" ? "confirmed" : "soft")}</div><h3>${e(task.title)}</h3>${!compact && task.description ? `<p>${e(task.description)}</p>` : ""}<div class="crew-task-assignee">${icon("user", 15)}${task.assigned_to ? `Toegewezen aan: <strong>${e(nameOf(task.assigned_to))}</strong>` : "Nog niet toegewezen"}</div>${!compact ? `<div class="crew-task-meta">Aangemaakt door ${e(nameOf(task.created_by))} · ${e(dateTimeText(task.created_at))}${task.completed_at ? ` · Afgerond ${e(dateTimeText(task.completed_at))}` : ""}${task.deadline_at ? ` · Deadline ${e(dateTimeText(task.deadline_at))}` : ""}</div>` : ""}${detail}</article>`;
 }
 
 function taskForm(shiftId) {
   const task = state.editTask ? state.data.tasks.find(item => item.id === state.editTask) : null;
   const people = signupsOf(shiftId);
-  return `<form class="crew-task-form crew-white-panel" data-form="task" data-id="${e(shiftId)}" ${task ? `data-task="${e(task.id)}"` : ""}><div class="crew-section-head"><h2>${task ? "Taak wijzigen" : "Nieuwe taak"}</h2>${task ? `<button type="button" class="crew-small-button" data-action="cancel-edit">Annuleren</button>` : ""}</div><div class="crew-form"><label>Titel<input name="title" required maxlength="120" value="${e(task?.title || "")}" placeholder="Wat moet er gebeuren?" /></label><label>Omschrijving<textarea name="description" rows="3" maxlength="1000" placeholder="Praktische details">${e(task?.description || "")}</textarea></label><div class="crew-form-pair"><label>Prioriteit<select name="priority">${["normaal", "belangrijk", "urgent"].map(x => `<option value="${x}" ${task?.priority === x ? "selected" : ""}>${x[0].toUpperCase() + x.slice(1)}</option>`).join("")}</select></label><label>Status<select name="status">${["te doen", "bezig", "klaar"].map(x => `<option value="${x}" ${task?.status === x ? "selected" : ""}>${x[0].toUpperCase() + x.slice(1)}</option>`).join("")}</select></label></div><label>Toewijzen aan<select name="assigned_to"><option value="">Nog niet toegewezen</option>${people.map(x => `<option value="${e(x.user_id)}" ${task?.assigned_to === x.user_id ? "selected" : ""}>${e(nameOf(x.user_id))}</option>`).join("")}</select></label><label class="crew-broadcast-option"><input type="checkbox" name="notify_all" ${task?.notify_all ? "checked" : ""} /> Meld urgente taak aan alle crewleden van deze shift</label><button type="submit" class="crew-button primary"><span>${task ? "Wijzigingen opslaan" : "Taak toevoegen"}</span><span class="crew-button-icon">${icon("plus", 17)}</span></button></div></form>`;
+  return `<form class="crew-task-form crew-white-panel" data-form="task" data-id="${e(shiftId)}" ${task ? `data-task="${e(task.id)}"` : ""}><div class="crew-section-head"><h2>${task ? "Taak wijzigen" : "Nieuwe taak"}</h2>${task ? `<button type="button" class="crew-small-button" data-action="cancel-edit">Annuleren</button>` : ""}</div><div class="crew-form"><label>Titel<input name="title" required maxlength="120" value="${e(task?.title || "")}" placeholder="Wat moet er gebeuren?" /></label><label>Omschrijving<textarea name="description" rows="3" maxlength="1000" placeholder="Praktische details">${e(task?.description || "")}</textarea></label><div class="crew-form-pair"><label>Prioriteit<select name="priority">${["normaal", "belangrijk", "urgent"].map(x => `<option value="${x}" ${task?.priority === x ? "selected" : ""}>${x[0].toUpperCase() + x.slice(1)}</option>`).join("")}</select></label><label>Status<select name="status">${["te doen", "bezig", "klaar"].map(x => `<option value="${x}" ${task?.status === x ? "selected" : ""}>${x[0].toUpperCase() + x.slice(1)}</option>`).join("")}</select></label></div><label>Toewijzen aan<select name="assigned_to"><option value="">Nog niet toegewezen</option>${people.map(x => `<option value="${e(x.user_id)}" ${task?.assigned_to === x.user_id ? "selected" : ""}>${e(nameOf(x.user_id))}</option>`).join("")}</select></label><label>Deadline <small>(optioneel)</small><input name="deadline_at" type="datetime-local" value="${task?.deadline_at ? e(new Date(task.deadline_at).toISOString().slice(0,16)) : ""}" /></label><label class="crew-broadcast-option"><input type="checkbox" name="notify_all" ${task?.notify_all ? "checked" : ""} /> Meld urgente taak aan alle crewleden van deze shift</label><button type="submit" class="crew-button primary"><span>${task ? "Wijzigingen opslaan" : "Taak toevoegen"}</span><span class="crew-button-icon">${icon("plus", 17)}</span></button></div></form>`;
 }
 
 function overviewTab(shift) {
@@ -439,14 +486,14 @@ function crewTab(shift) {
 }
 function documentsTab(shift) {
   const docs = docsOf(shift.id);
-  return `<div class="crew-room-grid"><section><div class="crew-section-head"><h2>Documenten</h2>${badge(`${docs.length} bestanden`, "soft")}</div><div class="crew-doc-grid">${docs.length ? docs.map(doc => `<article class="crew-doc-card"><div class="crew-doc-icon">${icon("file", 28)}</div><span class="eyebrow">${e(doc.file_type)}</span><h3>${e(doc.title)}</h3><p>${e(doc.mime_type?.split("/").pop().toUpperCase() || "BESTAND")}</p>${button("Open document", "open-doc", doc.id, "secondary")}<button type="button" class="crew-text-link" data-action="download-doc" data-id="${e(doc.id)}">Download bestand</button>${isManager() ? `<button type="button" class="crew-text-link" data-action="delete-doc" data-id="${e(doc.id)}">Document verwijderen</button>` : ""}</article>`).join("") : empty("Nog geen documenten", "Het draaiboek en andere bestanden verschijnen hier zodra ze zijn toegevoegd.")}</div></section>${isManager() ? `<aside><form class="crew-white-panel crew-form" data-form="document" data-id="${e(shift.id)}"><h2>Document toevoegen</h2><label>Titel<input name="title" maxlength="120" required placeholder="Bijvoorbeeld: draaiboek" /></label><label>Type<select name="file_type">${documentTypes.map(type => `<option>${e(type)}</option>`).join("")}</select></label><label>Bestand<input name="file" type="file" required accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.txt" /></label><p class="crew-form-hint">Maximaal 20 MB. Alleen crew van deze shift kan het bestand openen.</p><button type="submit" class="crew-button primary"><span>Upload document</span><span class="crew-button-icon">${icon("plus", 17)}</span></button></form></aside>` : ""}</div>`;
+  return `<div class="crew-room-grid"><section><div class="crew-section-head"><h2>Documenten</h2><div class="crew-task-tools">${badge(`${docs.length} bestanden`, "soft")}${refreshButton()}</div></div><div class="crew-doc-grid">${docs.length ? docs.map(doc => `<article class="crew-doc-card"><div class="crew-doc-icon">${icon("file", 28)}</div><span class="eyebrow">${e(doc.file_type)}</span><h3>${e(doc.title)}</h3><p>${e(doc.mime_type?.split("/").pop().toUpperCase() || "BESTAND")}</p>${button("Open document", "open-doc", doc.id, "secondary")}<button type="button" class="crew-text-link" data-action="download-doc" data-id="${e(doc.id)}">Download bestand</button>${isManager() ? `<button type="button" class="crew-text-link" data-action="delete-doc" data-id="${e(doc.id)}">Document verwijderen</button>` : ""}</article>`).join("") : empty("Nog geen documenten", "Het draaiboek en andere bestanden verschijnen hier zodra ze zijn toegevoegd.")}</div></section>${isManager() ? `<aside><form class="crew-white-panel crew-form" data-form="document" data-id="${e(shift.id)}"><h2>Document toevoegen</h2><label>Titel<input name="title" maxlength="120" required placeholder="Bijvoorbeeld: draaiboek" /></label><label>Type<select name="file_type">${documentTypes.map(type => `<option>${e(type)}</option>`).join("")}</select></label><div class="crew-file-drop" data-dropzone><strong>Sleep bestand hierheen</strong><span>PDF, Word of afbeelding · maximaal 20 MB</span><button type="button" class="crew-small-button lime" data-action="pick-file">Bestand kiezen</button><input id="document-file" name="file" type="file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.webp,image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" tabindex="-1" aria-label="Bestand kiezen" /></div><p class="crew-file-name" id="file-name">Nog geen bestand gekozen</p><p class="crew-refresh-status" id="upload-status" role="status"></p><button type="submit" class="crew-button primary"><span>Upload document</span><span class="crew-button-icon">${icon("plus", 17)}</span></button></form></aside>` : ""}</div>`;
 }
 function roomPage(shift, tab) {
   const event = eventOf(shift);
   const tabs = [["overzicht", "Overzicht"], ["taken", "Taken"], ["crew", "Crew"], ["documenten", "Documenten"]];
   const selected = tabs.some(([id]) => id === tab) ? tab : "overzicht";
   const body = selected === "taken" ? tasksTab(shift) : selected === "crew" ? crewTab(shift) : selected === "documenten" ? documentsTab(shift) : overviewTab(shift);
-  return shell(`<a class="crew-back" href="#${isManager() ? `manage/${event.id}` : "shifts"}">${icon("back", 16)} Terug naar ${isManager() ? "event" : "mijn shifts"}</a><div class="crew-room-hero"><span class="eyebrow">EVENTRUIMTE · ${e(shift.title.toUpperCase())}</span><h1>${e(event.title)}</h1>${event.subtitle ? `<p class="crew-hero-subtitle">${e(event.subtitle)}</p>` : ""}<div><span>${icon("calendar", 16)}${e(dateText(shift.date))}</span><span>${icon("clock", 16)}${e(shiftTime(shift))}</span><span>${icon("users", 16)}${occupancyOf(shift.id)} crewleden</span><span>${icon("room", 16)}${e(event.location)}</span></div></div><div class="crew-tab-bar" role="tablist" aria-label="Eventruimte onderdelen">${tabs.map(([id, label]) => `<a role="tab" aria-selected="${selected === id}" href="#room/${e(shift.id)}/${id}" class="${selected === id ? "active" : ""}">${label}</a>`).join("")}</div><div class="crew-room-content">${body}</div>`, "rooms");
+  return shell(`<a class="crew-back" href="#${isManager() ? `manage/${event.id}` : "shifts"}">${icon("back", 16)} Terug naar ${isManager() ? "event" : "mijn shifts"}</a><div class="crew-room-hero"><span class="eyebrow">EVENTRUIMTE · ${e(shift.title.toUpperCase())}</span><h1>${e(event.title)}</h1>${event.subtitle ? `<p class="crew-hero-subtitle">${e(event.subtitle)}</p>` : ""}<div><span>${icon("calendar", 16)}${e(dateText(shift.date))}</span><span>${icon("clock", 16)}${e(shiftTime(shift))}</span><span>${icon("users", 16)}${occupancyOf(shift.id)} crewleden</span><span>${icon("room", 16)}${e(shift.location || event.location)}</span></div></div><div class="crew-section-head">${refreshButton()}</div><div class="crew-tab-bar" role="tablist" aria-label="Eventruimte onderdelen">${tabs.map(([id, label]) => `<a role="tab" aria-selected="${selected === id}" href="#room/${e(shift.id)}/${id}" class="${selected === id ? "active" : ""}">${label}</a>`).join("")}</div><div class="crew-room-content">${body}</div>`, "rooms");
 }
 
 function eventCardManager(event) {
@@ -462,21 +509,57 @@ function eventForm() {
 function editEventForm(event) {
   return `<details class="crew-edit-details"><summary>Eventinformatie bewerken</summary><form class="crew-form" data-form="event-edit" data-id="${e(event.id)}"><label>Eventnaam<input name="title" required maxlength="120" value="${e(event.title)}" /></label><label>Thema of subtitel <small>(optioneel)</small><input name="subtitle" maxlength="120" value="${e(event.subtitle || "")}" /></label><div class="crew-form-pair"><label>Type<input name="type" required maxlength="80" value="${e(event.type)}" /></label><label>Locatie<input name="location" required value="${e(event.location)}" /></label></div><div class="crew-form-pair"><label>Startdatum<input name="start_date" type="date" required value="${e(event.start_date)}" /></label><label>Einddatum<input name="end_date" type="date" required value="${e(event.end_date)}" /></label></div><label>Eventmanager<select name="manager_id"><option value="">LIEF eventteam</option>${state.data.profiles.filter(person => person.role === "manager").map(person => `<option value="${e(person.id)}" ${event.manager_id === person.id ? "selected" : ""}>${e(person.full_name)}</option>`).join("")}</select></label><label>Omschrijving<textarea name="description" rows="5">${e(event.description)}</textarea></label><button type="submit" class="crew-button primary"><span>Event opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form></details>`;
 }
+function managerShiftForm(eventId = "") {
+  const events = state.data.events.filter(x => x.end_date >= todayIso());
+  const selected = state.managerEvent || eventId || events[0]?.id || "";
+  const event = state.data.events.find(x => x.id === selected);
+  return `<form class="crew-white-panel crew-form crew-create-form" data-form="shift" data-id="${e(selected)}"><div class="crew-section-head"><h2>Shift toevoegen</h2><button type="button" class="crew-small-button" data-action="close-manager-action">Sluiten</button></div><label>Event<select name="event_id" data-action="manager-event">${events.map(x => `<option value="${e(x.id)}" ${x.id === selected ? "selected" : ""}>${e(x.title)} · ${e(dateText(x.start_date, { day: "numeric", month: "short" }))}</option>`).join("")}</select></label><label>Titel shift<input name="title" required maxlength="80" placeholder="Bijvoorbeeld middagshift" /></label><label>Datum<input name="date" type="date" min="${e(event?.start_date || "")}" max="${e(event?.end_date || "")}" value="${e(event?.start_date || "")}" required /></label><div class="crew-form-pair"><label>Begintijd<input name="start_time" type="time" required /></label><label>Eindtijd<input name="end_time" type="time" required /></label></div><label>Locatie<input name="location" value="${e(event?.location || "LIEF Amsterdam")}" required /></label><label>Briefing<textarea name="briefing" rows="3"></textarea></label><div class="crew-section-head"><h3>Rollen en aantallen</h3></div><div id="new-shift-roles" class="crew-new-role-list">${["Bar", "Runner", "Debras", "Hospitality"].map((name, index) => `<div class="crew-new-role-row"><label>Rol<input name="role_name_${index}" list="role-suggestions" value="${name}" required /></label><label>Aantal<input name="role_count_${index}" type="number" min="1" max="99" value="1" required /></label></div>`).join("")}</div><button type="button" class="crew-small-button" data-action="add-shift-role">${icon("plus", 16)} Rol toevoegen</button><strong id="shift-total">Totaal benodigd: 4 medewerkers</strong><label class="crew-broadcast-option"><input type="checkbox" name="published" checked /> Direct publiceren</label><button type="submit" class="crew-button primary"><span>Shift opslaan</span><span class="crew-button-icon">${icon("plus", 17)}</span></button></form><datalist id="role-suggestions">${roleNames.map(name => `<option value="${e(name)}"></option>`).join("")}</datalist>`;
+}
+function managerTaskForm() {
+  const eventId = state.managerEvent || state.data.events.find(x => x.end_date >= todayIso())?.id;
+  const shifts = orderedShifts().filter(x => x.event_id === eventId);
+  const shiftId = state.managerShift && shifts.some(x => x.id === state.managerShift) ? state.managerShift : shifts[0]?.id;
+  return `<form class="crew-white-panel crew-form crew-create-form" data-form="manager-task"><div class="crew-section-head"><h2>Taak toevoegen</h2><button type="button" class="crew-small-button" data-action="close-manager-action">Sluiten</button></div><label>Event<select data-action="manager-event" name="event_id">${state.data.events.filter(x => x.end_date >= todayIso()).map(x => `<option value="${e(x.id)}" ${x.id === eventId ? "selected" : ""}>${e(x.title)} · ${e(dateText(x.start_date, { day: "numeric", month: "short" }))}</option>`).join("")}</select></label><label>Shift<select data-action="manager-shift" name="shift_id" required>${shifts.map(x => `<option value="${e(x.id)}" ${x.id === shiftId ? "selected" : ""}>${e(x.title)} · ${e(dateText(x.date, { day: "numeric", month: "short" }))}</option>`).join("")}</select></label><label>Titel<input name="title" maxlength="120" required /></label><label>Omschrijving<textarea name="description" maxlength="1000"></textarea></label><div class="crew-form-pair"><label>Prioriteit<select name="priority"><option value="normaal">Normaal</option><option value="belangrijk">Belangrijk</option><option value="urgent">Urgent</option></select></label><label>Deadline <small>(optioneel)</small><input name="deadline_at" type="datetime-local" /></label></div><label>Toewijzen aan<select name="assigned_to"><option value="">Hele shift / vrije taak</option>${shiftId ? signupsOf(shiftId).map(x => `<option value="${e(x.user_id)}">${e(nameOf(x.user_id))}</option>`).join("") : ""}</select></label><label class="crew-broadcast-option"><input type="checkbox" name="notify_all" /> Urgente melding aan de hele shift sturen</label><button type="submit" class="crew-button primary"><span>Taak toevoegen</span><span class="crew-button-icon">${icon("plus", 17)}</span></button></form>`;
+}
+function managerQuickAction() {
+  if (state.managerAction === "shift") return managerShiftForm();
+  if (state.managerAction === "task") return managerTaskForm();
+  if (["document", "announcement"].includes(state.managerAction)) {
+    const eventId = state.managerEvent || state.data.events.find(x => x.end_date >= todayIso())?.id;
+    const shifts = orderedShifts().filter(x => x.event_id === eventId);
+    const choices = `<label>Event<select data-action="manager-event" name="event_id">${state.data.events.filter(x => x.end_date >= todayIso()).map(x => `<option value="${e(x.id)}" ${x.id === eventId ? "selected" : ""}>${e(x.title)}</option>`).join("")}</select></label><label>Shift<select data-action="manager-shift" name="shift_id" required>${shifts.map(x => `<option value="${e(x.id)}">${e(x.title)} · ${e(dateText(x.date, { day: "numeric", month: "short" }))}</option>`).join("")}</select></label>`;
+    const body = state.managerAction === "document" ? `<label>Titel<input name="title" maxlength="120" required /></label><label>Type<select name="file_type">${documentTypes.map(type => `<option>${e(type)}</option>`).join("")}</select></label><div class="crew-file-drop" data-dropzone><strong>Sleep bestand hierheen</strong><span>PDF, Word of afbeelding · maximaal 20 MB</span><button type="button" class="crew-small-button lime" data-action="pick-file">Bestand kiezen</button><input id="document-file" name="file" type="file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.webp,image/*" tabindex="-1" aria-label="Bestand kiezen" /></div><p class="crew-file-name" id="file-name">Nog geen bestand gekozen</p><p class="crew-refresh-status" id="upload-status" role="status"></p>` : `<label>Belangrijke mededeling<textarea name="announcement" rows="4" required maxlength="2000"></textarea></label>`;
+    return `<form class="crew-white-panel crew-form crew-create-form" data-form="${state.managerAction === "document" ? "document" : "announcement"}" data-id="${e(shifts[0]?.id || "")}"><div class="crew-section-head"><h2>${state.managerAction === "document" ? "Document toevoegen" : "Nieuwe mededeling"}</h2><button type="button" class="crew-small-button" data-action="close-manager-action">Sluiten</button></div>${choices}${body}<button type="submit" class="crew-button primary" ${shifts.length ? "" : "disabled"}><span>${state.managerAction === "document" ? "Upload document" : "Mededeling plaatsen"}</span><span class="crew-button-icon">${icon("plus", 17)}</span></button></form>`;
+  }
+  return "";
+}
 function managerPage() {
   const upcoming = state.data.events.filter(event => event.end_date >= todayIso()).sort((a, b) => a.start_date.localeCompare(b.start_date));
   const openShifts = upcomingShifts().filter(shift => shift.required_people === 0 || occupancyOf(shift.id) < shift.required_people).length;
   const openTasks = state.data.tasks.filter(task => task.status !== "klaar");
-  const stats = [[upcoming.length, "Aankomende events"], [openShifts, "Open shifts"], [state.data.profiles.filter(p => p.role === "employee").length, "Crewleden"], [openTasks.length, "Open taken"], [openTasks.filter(t => t.priority === "urgent").length, "Urgente taken"]];
-  return shell(`<div class="crew-manager-title">${heading("MANAGER · LIEF AMSTERDAM", "De operatie in beeld.", "Events, shifts en bezetting in één overzicht.")}<button type="button" class="crew-button primary" data-action="show-event-form"><span>Nieuw event</span><span class="crew-button-icon">${icon("plus", 18)}</span></button></div>${state.showEventForm ? eventForm() : ""}<div class="crew-manager-stats">${stats.map(([value, label], index) => `<div class="${index === 4 ? "accent" : ""}"><strong>${value}</strong><span>${label}</span></div>`).join("")}</div><div class="crew-section-head"><h2>Aankomende events</h2>${badge(`${upcoming.length} events`, "soft")}</div><div class="crew-manager-event-grid">${upcoming.length ? upcoming.map(eventCardManager).join("") : empty("Nog geen events", "Maak het eerste event aan om shifts te plannen.")}</div>`, "manager");
+  const openPlaces = upcomingShifts().reduce((sum, shift) => sum + openOf(shift), 0);
+  const stats = [[upcoming.length, "Aankomende events"], [openShifts, "Open shifts"], [openPlaces, "Open plekken"], [openTasks.length, "Open taken"], [openTasks.filter(t => t.priority === "urgent").length, "Urgente taken"]];
+  return shell(`<div class="crew-manager-title">${heading("MANAGER · LIEF AMSTERDAM", "Crew en events.", "De belangrijkste acties en bezetting direct in beeld.")}${refreshButton()}</div><div class="crew-manager-actions">${[["staff", "Personeel inplannen"], ["shift", "Shift toevoegen"], ["task", "Taak toevoegen"], ["document", "Document toevoegen"], ["announcement", "Nieuwe mededeling"]].map(([key, label]) => button(label, "manager-action", key, key === "staff" ? "primary" : "secondary")).join("")}</div>${managerQuickAction()}${managerSwaps()}${state.showEventForm ? eventForm() : ""}<div class="crew-manager-stats">${stats.map(([value, label], index) => `<div class="${index === 4 ? "accent" : ""}"><strong>${value}</strong><span>${label}</span></div>`).join("")}</div><div class="crew-section-head" id="manager-events"><h2>Aankomende events</h2><button type="button" class="crew-small-button" data-action="show-event-form">${icon("plus", 16)} Nieuw event</button></div><div class="crew-manager-event-grid">${upcoming.length ? upcoming.map(eventCardManager).join("") : empty("Nog geen events", "Maak het eerste event aan om shifts te plannen.")}</div>${managerFeedback()}`, "manager");
+}
+function managerSwaps() {
+  const items = [...(state.data.shift_swaps || [])].sort((a,b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0,20);
+  if (!items.length) return "";
+  const names = { offered: "Aangeboden", interested: "Interesse", pending: "Wacht op manager", approved: "Goedgekeurd", rejected: "Afgewezen", withdrawn: "Ingetrokken" };
+  return `<section class="crew-manager-feedback"><div class="crew-section-head"><h2>Dienstenmarktplaats</h2>${badge(`${items.filter(x => x.status === "pending").length} ter goedkeuring`, "open")}</div><div class="crew-member-grid">${items.map(x => `<article class="crew-white-panel"><strong>${e(eventOf(shiftOf(x.shift_id))?.title || "Event")} · ${e(x.role)}</strong><p>${e(nameOf(x.from_user))} → ${e(x.to_user ? nameOf(x.to_user) : "Nog geen vervanger")}</p>${badge(names[x.status] || x.status, x.status === "pending" ? "open" : "soft")}${x.status === "pending" ? `${button("Goedkeuren", "approve-swap", x.id)}${button("Afwijzen", "reject-swap", x.id, "secondary")}` : ""}</article>`).join("")}</div></section>`;
+}
+function managerFeedback() {
+  const items = state.data.shift_feedback || [];
+  if (!items.length) return "";
+  return `<section class="crew-manager-feedback"><div class="crew-section-head"><h2>Feedback na shifts</h2></div><div class="crew-member-grid">${items.slice(0, 10).map(x => `<article class="crew-white-panel"><strong>${e(nameOf(x.user_id))} · ${e(eventOf(shiftOf(x.shift_id))?.title || "Event")}</strong><p>${x.liked ? "♥ · " : ""}${e(x.text || "Geen toelichting")}</p></article>`).join("")}</div></section>`;
 }
 function shiftManagePanel(shift) {
   const members = signupsOf(shift.id);
   const event = eventOf(shift);
-  return `<article class="crew-white-panel crew-manage-shift" id="shift-${e(shift.id)}"><div class="crew-section-head"><div><span class="eyebrow">${e(dateText(shift.date))} · ${e(shiftTime(shift))}</span><h2>${e(shift.title)}</h2></div>${shift.published === false ? badge("Concept", "pending") : badge(`${assignedOf(shift.id)} / ${shift.required_people} ingepland`, openOf(shift) ? "open" : "confirmed")}</div><div class="crew-manage-metrics"><span>${occupancyOf(shift.id)} aangemeld</span><span>${openOf(shift)} posities open</span><span>${tasksOf(shift.id).filter(t => t.status !== "klaar").length} taken open</span><span>${docsOf(shift.id).length} documenten</span></div>${shift.published === false ? `<div class="crew-publish"><p>Deze shift is nog niet zichtbaar voor medewerkers. Voeg eerst rollen toe en publiceer daarna.</p>${button("Publiceer shift", "publish-shift", shift.id, "primary", rolesOf(shift.id).length ? "" : "disabled")}</div>` : ""}<details class="crew-edit-details"><summary>Shift en briefing bewerken</summary><form class="crew-form" data-form="shift-edit" data-id="${e(shift.id)}"><label>Shiftnaam<input name="title" required maxlength="80" value="${e(shift.title)}" /></label><label>Datum<input name="date" type="date" min="${e(event.start_date)}" max="${e(event.end_date)}" required value="${e(shift.date)}" /></label><div class="crew-form-pair"><label>Begintijd<input name="start_time" type="time" required value="${e(timeText(shift.start_time))}" /></label><label>Eindtijd<input name="end_time" type="time" required value="${e(timeText(shift.end_time))}" /></label></div><label>Briefing<textarea name="briefing" rows="3">${e(shift.briefing)}</textarea></label><label>Belangrijke mededeling<textarea name="announcement" rows="2">${e(shift.announcement)}</textarea></label><button type="submit" class="crew-button primary"><span>Shift opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form></details><div class="crew-role-table"><div class="crew-role-header"><strong>Rol</strong><strong>Bezet</strong><strong>Benodigd</strong></div>${rolesOf(shift.id).map(role => `<div class="crew-role-row"><span>${e(role.name)}</span><strong>${roleAssigned(shift.id, role.name)} / ${role.required_count}</strong><input type="number" min="${Math.max(1, roleAssigned(shift.id, role.name))}" max="99" value="${role.required_count}" data-action="role-need" data-id="${e(role.id)}" aria-label="Benodigd aantal ${e(role.name)}" /></div>`).join("")}</div><form class="crew-add-role" data-form="role" data-id="${e(shift.id)}"><label>Rol toevoegen<input name="name" list="role-suggestions" required maxlength="80" placeholder="Bijvoorbeeld Bar" /></label><label>Aantal<input name="required_count" type="number" min="1" max="99" value="1" required /></label><button type="submit" class="crew-small-button lime">${icon("plus", 17)} Toevoegen</button></form><div class="crew-manage-crew"><strong>Aangemelde crew</strong>${members.length ? members.map(x => `<div><span>${e(nameOf(x.user_id))} <small>· ${e(x.preferred_role || "geen voorkeur")}</small></span><select data-action="assign-role" data-id="${e(x.id)}" aria-label="Rol van ${e(nameOf(x.user_id))}"><option value="">Nog niet ingedeeld</option>${rolesOf(shift.id).map(role => `<option value="${e(role.name)}" ${x.assigned_role === role.name ? "selected" : ""} ${roleAssigned(shift.id, role.name) >= role.required_count && x.assigned_role !== role.name ? "disabled" : ""}>${e(role.name)}</option>`).join("")}</select></div>`).join("") : "<p>Nog geen aanmeldingen.</p>"}</div><a class="crew-button secondary" href="#room/${e(shift.id)}/overzicht"><span>Open eventruimte</span><span class="crew-button-icon">${icon("arrow", 17)}</span></a></article>`;
+  return `<article class="crew-white-panel crew-manage-shift" id="shift-${e(shift.id)}"><div class="crew-section-head"><div><span class="eyebrow">${e(dateText(shift.date))} · ${e(shiftTime(shift))}</span><h2>${e(shift.title)}</h2></div>${shift.published === false ? badge("Concept", "pending") : badge(`${assignedOf(shift.id)} / ${shift.required_people} ingepland`, openOf(shift) ? "open" : "confirmed")}</div><div class="crew-manage-metrics"><span>${occupancyOf(shift.id)} aangemeld</span><span>${openOf(shift)} posities open</span><span>${tasksOf(shift.id).filter(t => t.status !== "klaar").length} taken open</span><span>${docsOf(shift.id).length} documenten</span></div>${shift.published === false ? `<div class="crew-publish"><p>Deze shift is nog niet zichtbaar voor medewerkers. Voeg eerst rollen toe en publiceer daarna.</p>${button("Publiceer shift", "publish-shift", shift.id, "primary", rolesOf(shift.id).length ? "" : "disabled")}</div>` : ""}<details class="crew-edit-details"><summary>Shift en briefing bewerken</summary><form class="crew-form" data-form="shift-edit" data-id="${e(shift.id)}"><label>Shiftnaam<input name="title" required maxlength="80" value="${e(shift.title)}" /></label><label>Datum<input name="date" type="date" min="${e(event.start_date)}" max="${e(event.end_date)}" required value="${e(shift.date)}" /></label><div class="crew-form-pair"><label>Begintijd<input name="start_time" type="time" required value="${e(timeText(shift.start_time))}" /></label><label>Eindtijd<input name="end_time" type="time" required value="${e(timeText(shift.end_time))}" /></label></div><label>Locatie<input name="location" value="${e(shift.location || event.location)}" required /></label><label>Briefing<textarea name="briefing" rows="3">${e(shift.briefing)}</textarea></label><label>Belangrijke mededeling<textarea name="announcement" rows="2">${e(shift.announcement)}</textarea></label><button type="submit" class="crew-button primary"><span>Shift opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form></details><div class="crew-role-table"><div class="crew-role-header"><strong>Rol</strong><strong>Bezet</strong><strong>Benodigd</strong></div>${rolesOf(shift.id).map(role => `<div class="crew-role-row"><span>${e(role.name)}</span><strong>${roleAssigned(shift.id, role.name)} / ${role.required_count}</strong><input type="number" min="${Math.max(1, roleAssigned(shift.id, role.name))}" max="99" value="${role.required_count}" data-action="role-need" data-id="${e(role.id)}" aria-label="Benodigd aantal ${e(role.name)}" /></div>`).join("")}</div><form class="crew-add-role" data-form="role" data-id="${e(shift.id)}"><label>Rol toevoegen<input name="name" list="role-suggestions" required maxlength="80" placeholder="Bijvoorbeeld Bar" /></label><label>Aantal<input name="required_count" type="number" min="1" max="99" value="1" required /></label><button type="submit" class="crew-small-button lime">${icon("plus", 17)} Toevoegen</button></form><div class="crew-manage-crew"><strong>Aangemelde crew</strong>${members.length ? members.map(x => `<div><span>${e(nameOf(x.user_id))} <small>· ${e(x.preferred_role || "geen voorkeur")}</small></span><select data-action="assign-role" data-id="${e(x.id)}" aria-label="Rol van ${e(nameOf(x.user_id))}"><option value="">Nog niet ingedeeld</option>${rolesOf(shift.id).map(role => `<option value="${e(role.name)}" ${x.assigned_role === role.name ? "selected" : ""} ${roleAssigned(shift.id, role.name) >= role.required_count && x.assigned_role !== role.name ? "disabled" : ""}>${e(role.name)}</option>`).join("")}</select></div>`).join("") : "<p>Nog geen aanmeldingen.</p>"}</div><a class="crew-button secondary" href="#room/${e(shift.id)}/overzicht"><span>Open eventruimte</span><span class="crew-button-icon">${icon("arrow", 17)}</span></a></article>`;
 }
 function manageEventPage(event) {
   const shifts = orderedShifts().filter(shift => shift.event_id === event.id);
-  return shell(`<a class="crew-back" href="#manager">${icon("back", 16)} Terug naar overzicht</a><div class="crew-manage-hero"><span class="eyebrow">EVENT BEHEREN · ${e(event.type.toUpperCase())}</span><h1>${e(event.title)}</h1>${event.subtitle ? `<p class="crew-hero-subtitle">${e(event.subtitle)}</p>` : ""}<p>${e(event.description)}</p><div><span>${icon("calendar", 16)}${e(dateText(event.start_date))}</span><span>${icon("room", 16)}${e(event.location)}</span><span>${icon("ticket", 16)}${shifts.length} shift${shifts.length === 1 ? "" : "s"}</span></div></div>${editEventForm(event)}<div class="crew-section-head"><h2>Shifts en bezetting</h2>${badge(`${shifts.reduce((sum, shift) => sum + openOf(shift), 0)} posities open`, "open")}</div><div class="crew-manage-grid"><section>${shifts.length ? shifts.map(shiftManagePanel).join("") : empty("Nog geen shifts", "Voeg hieronder de eerste shift toe.")}</section><aside><form class="crew-white-panel crew-form" data-form="shift" data-id="${e(event.id)}"><h2>Shift toevoegen</h2><label>Naam<input name="title" required maxlength="80" placeholder="Bijvoorbeeld Ochtendshift" /></label><label>Datum<input name="date" type="date" min="${e(event.start_date)}" max="${e(event.end_date)}" value="${e(event.start_date)}" required /></label><div class="crew-form-pair"><label>Begintijd<input name="start_time" type="time" required /></label><label>Eindtijd<input name="end_time" type="time" required /></label></div><label>Briefing<textarea name="briefing" rows="3"></textarea></label><button type="submit" class="crew-button primary"><span>Shift toevoegen</span><span class="crew-button-icon">${icon("plus", 17)}</span></button><p class="crew-form-hint">Voeg daarna rollen en benodigde aantallen toe.</p></form></aside></div><datalist id="role-suggestions">${roleNames.map(name => `<option value="${e(name)}"></option>`).join("")}</datalist>`, "manager");
+  return shell(`<a class="crew-back" href="#manager">${icon("back", 16)} Terug naar overzicht</a><div class="crew-manage-hero"><span class="eyebrow">EVENT BEHEREN · ${e(event.type.toUpperCase())}</span><h1>${e(event.title)}</h1>${event.subtitle ? `<p class="crew-hero-subtitle">${e(event.subtitle)}</p>` : ""}<p>${e(event.description)}</p><div><span>${icon("calendar", 16)}${e(dateText(event.start_date))}</span><span>${icon("room", 16)}${e(event.location)}</span><span>${icon("ticket", 16)}${shifts.length} shift${shifts.length === 1 ? "" : "s"}</span></div></div>${editEventForm(event)}<div class="crew-section-head"><h2>Shifts en bezetting</h2>${badge(`${shifts.reduce((sum, shift) => sum + openOf(shift), 0)} posities open`, "open")}</div><div class="crew-manage-grid"><section>${shifts.length ? shifts.map(shiftManagePanel).join("") : empty("Nog geen shifts", "Voeg hieronder de eerste shift toe.")}</section><aside>${managerShiftForm(event.id)}</aside></div>`, "manager");
 }
 
 function render() {
@@ -498,6 +581,7 @@ function render() {
   else if (page === "shifts") root.innerHTML = myShiftsPage();
   else if (page === "rooms") root.innerHTML = roomsPage();
   else if (page === "planning") root.innerHTML = planningPage();
+  else if (page === "marketplace") root.innerHTML = marketplacePage();
   else if (page === "notifications") root.innerHTML = notificationsPage();
   else if (page === "profile") root.innerHTML = profilePage();
   else if (page === "manager" && isManager()) root.innerHTML = managerPage();
@@ -508,12 +592,8 @@ function render() {
   state.toast = "";
   const roomId = allowed ? id : null;
   if (supa && state.roomChannelId !== roomId) {
-    if (state.roomChannel) supa.removeChannel(state.roomChannel);
-    state.roomChannel = null;
     state.roomChannelId = roomId;
-    if (roomId) state.roomChannel = supa.channel(`shift-tasks-${roomId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "tasks", filter: `shift_id=eq.${roomId}` }, () => refreshTasks(roomId).catch(console.error))
-      .subscribe(status => { if (status === "SUBSCRIBED") refreshTasks(roomId).catch(console.error); });
+    if (roomId) refreshTasks(roomId).catch(console.error);
   }
 }
 
@@ -561,6 +641,36 @@ root.addEventListener("click", event => {
     else { state.authMode = id; state.toast = ""; render(); }
   }
   if (action === "refresh-tasks") refreshTasks(id);
+  if (action === "refresh-page") refreshCurrent();
+  if (action === "pick-file") target.closest("form")?.querySelector('input[type="file"]')?.click();
+  if (action === "manager-action" && isManager()) { state.managerAction = id; state.managerEvent = ""; state.managerShift = ""; render(); document.querySelector(id === "staff" ? "#manager-events" : ".crew-manager-actions")?.scrollIntoView({ block: "start" }); }
+  if (action === "close-manager-action") { state.managerAction = ""; render(); }
+  if (action === "add-shift-role" && isManager()) {
+    const list = document.getElementById("new-shift-roles"), index = list ? Math.max(-1, ...[...list.querySelectorAll('input[name^="role_name_"]')].map(x => Number(x.name.split("_").pop()))) + 1 : 0;
+    if (list && list.children.length < 20) { list.insertAdjacentHTML("beforeend", `<div class="crew-new-role-row"><label>Rol<input name="role_name_${index}" list="role-suggestions" required maxlength="80" /></label><label>Aantal<input name="role_count_${index}" type="number" min="1" max="99" value="1" required /></label><button type="button" class="crew-small-button" data-action="remove-shift-role">Verwijder</button></div>`); updateShiftTotal(); }
+  }
+  if (action === "remove-shift-role") { target.closest(".crew-new-role-row")?.remove(); updateShiftTotal(); }
+  if (action === "show-offer") { state.offeringShift = id; render(); }
+  if (action === "toggle-heart") {
+    const button = target, input = button.closest("form")?.querySelector('[name="liked"]');
+    if (input) { input.value = input.value === "true" ? "false" : "true"; button.classList.toggle("active", input.value === "true"); button.setAttribute("aria-pressed", input.value); }
+  }
+  if (["interest-swap", "withdraw-swap", "approve-swap", "reject-swap"].includes(action)) run(async () => {
+    if (!supa) {
+      const item = state.data.shift_swaps.find(x => x.id === id);
+      if (action === "interest-swap") { item.to_user = state.user.id; item.status = "pending"; }
+      if (action === "withdraw-swap") item.status = "withdrawn";
+      if (action === "reject-swap") item.status = "rejected";
+      if (action === "approve-swap") { const old = state.data.shift_signups.find(x => x.shift_id === item.shift_id && x.user_id === item.from_user); old.available = false; old.assigned_role = null; state.data.shift_signups.push({ id: crypto.randomUUID(), shift_id: item.shift_id, user_id: item.to_user, preferred_role: item.role, assigned_role: item.role, available: true, status: "bevestigd" }); item.status = "approved"; }
+      await refresh();
+    } else {
+      const functionName = { "interest-swap": "interest_shift_swap", "withdraw-swap": "withdraw_shift_swap", "approve-swap": "approve_shift_swap", "reject-swap": "reject_shift_swap" }[action];
+      const result = await supa.rpc(functionName, { p_swap: id });
+      if (result.error) throw result.error;
+      await refresh();
+    }
+    toast(action === "approve-swap" ? "Dienst overgedragen. Beide medewerkers krijgen bericht." : action === "interest-swap" ? "Je interesse is doorgegeven. De manager beslist over de ruil." : "Dienstaanbod bijgewerkt.");
+  });
   if (action === "read-notification") run(async () => { await markNotificationRead(id); render(); });
   if (action === "read-all-notifications") run(async () => {
     const unread = state.notifications.filter(item => !item.read_at);
@@ -591,7 +701,7 @@ root.addEventListener("click", event => {
   if (action === "available") { state.available = id === "yes"; render(); }
   if (action === "signup") openSignup(id);
   if (action === "room") go(`room/${id}/overzicht`);
-  if (action === "manage-event") go(`manage/${id}`);
+  if (action === "manage-event") { state.managerEvent = id; go(`manage/${id}`); }
   if (action === "manage-shift") { const s = shiftOf(id); go(`manage/${s.event_id}`); setTimeout(() => document.getElementById(`shift-${id}`)?.scrollIntoView({ behavior: "smooth" }), 50); }
   if (action === "publish-shift" && isManager()) run(async () => {
     if (!rolesOf(id).length) throw new Error("Voeg eerst minimaal één rol toe.");
@@ -710,8 +820,10 @@ root.addEventListener("click", event => {
     if (supa) { const { error } = await supa.auth.signOut(); if (error) throw error; }
     if (state.roomChannel && supa) supa.removeChannel(state.roomChannel);
     if (state.notificationChannel && supa) supa.removeChannel(state.notificationChannel);
+    if (state.dataChannel && supa) supa.removeChannel(state.dataChannel);
+    clearTimeout(state.dataRefreshTimer);
     state.roomChannel = null; state.roomChannelId = null; state.user = null; state.profile = null; state.data = null; state.notificationPreferences = null; state.pushEnabled = false; state.authMode = "login";
-    state.notificationChannel = null; state.notifications = [];
+    state.notificationChannel = null; state.dataChannel = null; state.notifications = [];
     history.replaceState(null, "", "/"); render();
   });
 });
@@ -729,6 +841,14 @@ root.addEventListener("change", event => {
   });
   if (action === "first-role") { state.firstRole = target.value; if (state.secondRole === target.value) state.secondRole = ""; render(); }
   if (action === "second-role") { state.secondRole = target.value; }
+  if (action === "manager-event") { state.managerEvent = target.value; state.managerShift = ""; render(); }
+  if (action === "manager-shift") { state.managerShift = target.value; if (state.managerAction === "task") render(); }
+  if (target.name === "file") {
+    state.uploadFile = target.files?.[0] || null;
+    state.uploadForm = target.closest("form");
+    const label = document.getElementById("file-name");
+    if (label) label.textContent = state.uploadFile?.name || "Nog geen bestand gekozen";
+  }
   if (action === "assign-role" && isManager()) run(async () => {
     const signup = state.data.shift_signups.find(x => x.id === target.dataset.id), role = target.value;
     if (role) {
@@ -745,6 +865,22 @@ root.addEventListener("change", event => {
     if (!supa) { shiftOf(role.shift_id).required_people = rolesOf(role.shift_id).reduce((sum, x) => sum + x.required_count, 0); await refresh(); }
     toast(`Benodigd aantal voor ${role.name} bijgewerkt.`);
   });
+});
+function updateShiftTotal() {
+  const counts = [...document.querySelectorAll('#new-shift-roles input[type="number"]')];
+  const total = counts.reduce((sum, input) => sum + (Number(input.value) || 0), 0);
+  const label = document.getElementById("shift-total");
+  if (label) label.textContent = `Totaal benodigd: ${total} medewerkers`;
+}
+root.addEventListener("input", event => { if (event.target.closest("#new-shift-roles")) updateShiftTotal(); });
+root.addEventListener("dragover", event => { const zone = event.target.closest("[data-dropzone]"); if (zone) { event.preventDefault(); zone.classList.add("dragging"); } });
+root.addEventListener("dragleave", event => { event.target.closest("[data-dropzone]")?.classList.remove("dragging"); });
+root.addEventListener("drop", event => {
+  const zone = event.target.closest("[data-dropzone]"); if (!zone) return;
+  event.preventDefault(); zone.classList.remove("dragging");
+  state.uploadFile = event.dataTransfer?.files?.[0] || null;
+  state.uploadForm = zone.closest("form");
+  const label = document.getElementById("file-name"); if (label) label.textContent = state.uploadFile?.name || "Nog geen bestand gekozen";
 });
 
 root.addEventListener("invalid", event => {
@@ -837,11 +973,33 @@ root.addEventListener("submit", event => {
     toast("Eventinformatie opgeslagen.");
   });
   if (form.dataset.form === "shift" && isManager()) run(async () => {
-    await insertRow("shifts", { event_id: form.dataset.id, title: String(values.title).trim(), date: values.date, start_time: values.start_time, end_time: values.end_time, briefing: String(values.briefing).trim(), announcement: "", required_people: 0, published: false });
-    toast("Conceptshift toegevoegd. Voeg rollen toe en publiceer de shift.");
+    const eventId = String(values.event_id || form.dataset.id), event = state.data.events.find(x => x.id === eventId);
+    if (!event || values.date < event.start_date || values.date > event.end_date) throw new Error("Kies een datum binnen het event.");
+    const roles = [...form.querySelectorAll(".crew-new-role-row")].map(row => ({ name: row.querySelector('input[name^="role_name_"]').value.trim(), required_count: Number(row.querySelector('input[name^="role_count_"]').value) }));
+    if (!roles.length || roles.some(x => !x.name || !Number.isInteger(x.required_count) || x.required_count < 1 || x.required_count > 99) || new Set(roles.map(x => x.name.toLowerCase())).size !== roles.length) throw new Error("Vul unieke rollen en geldige aantallen in.");
+    const row = { event_id: eventId, title: String(values.title).trim(), date: values.date, start_time: values.start_time, end_time: values.end_time, location: String(values.location).trim(), briefing: String(values.briefing).trim(), announcement: "", required_people: 0, published: false };
+    let shiftId;
+    if (supa) {
+      const result = await supa.from("shifts").insert(row).select("id").single();
+      if (result.error) throw result.error;
+      shiftId = result.data.id;
+      try {
+        const roleResult = await supa.from("shift_roles").insert(roles.map(x => ({ shift_id: shiftId, ...x })));
+        if (roleResult.error) throw roleResult.error;
+        if (values.published === "on") {
+          const published = await supa.from("shifts").update({ published: true }).eq("id", shiftId);
+          if (published.error) throw published.error;
+        }
+      } catch (error) { await supa.from("shifts").delete().eq("id", shiftId); throw error; }
+    } else {
+      shiftId = crypto.randomUUID();
+      state.data.shifts.push({ id: shiftId, ...row, required_people: roles.reduce((sum, x) => sum + x.required_count, 0), published: values.published === "on" });
+      state.data.shift_roles.push(...roles.map(x => ({ id: crypto.randomUUID(), shift_id: shiftId, ...x })));
+    }
+    state.managerAction = ""; await refresh(); toast(values.published === "on" ? "Shift met rollen gepubliceerd." : "Conceptshift met rollen opgeslagen.");
   });
   if (form.dataset.form === "shift-edit" && isManager()) run(async () => {
-    await updateRow("shifts", form.dataset.id, { title: String(values.title).trim(), date: values.date, start_time: values.start_time, end_time: values.end_time, briefing: String(values.briefing).trim(), announcement: String(values.announcement).trim() });
+    await updateRow("shifts", form.dataset.id, { title: String(values.title).trim(), date: values.date, start_time: values.start_time, end_time: values.end_time, location: String(values.location || "").trim(), briefing: String(values.briefing).trim(), announcement: String(values.announcement).trim() });
     toast("Shift en briefing opgeslagen.");
   });
   if (form.dataset.form === "role" && isManager()) run(async () => {
@@ -853,7 +1011,7 @@ root.addEventListener("submit", event => {
     toast(`${name} toegevoegd.`);
   });
   if (form.dataset.form === "task" && isManager()) run(async () => {
-    const row = { title: String(values.title).trim(), description: String(values.description).trim(), priority: values.priority, status: values.status, assigned_to: values.assigned_to || null, notify_all: values.notify_all === "on" };
+    const row = { title: String(values.title).trim(), description: String(values.description).trim(), priority: values.priority, status: values.status, assigned_to: values.assigned_to || null, notify_all: values.notify_all === "on", deadline_at: values.deadline_at ? new Date(String(values.deadline_at)).toISOString() : null };
     if (!row.title) throw new Error("Geef de taak een titel.");
     if (row.notify_all && row.priority !== "urgent") throw new Error("Kies prioriteit Urgent voor een melding aan de hele shift.");
     if (!supa) row.completed_at = row.status === "klaar" ? new Date().toISOString() : null;
@@ -861,18 +1019,64 @@ root.addEventListener("submit", event => {
     else await insertRow("tasks", { shift_id: form.dataset.id, ...row, created_by: state.user.id, created_at: new Date().toISOString(), completed_at: null });
     state.editTask = null; toast("Taak opgeslagen.");
   });
+  if (form.dataset.form === "manager-task" && isManager()) run(async () => {
+    const shiftId = String(values.shift_id || "");
+    if (!shiftOf(shiftId)) throw new Error("Kies eerst een shift.");
+    const notifyAll = values.notify_all === "on";
+    if (notifyAll && values.priority !== "urgent") throw new Error("Een melding aan de hele shift vereist prioriteit Urgent.");
+    const row = { shift_id: shiftId, title: String(values.title).trim(), description: String(values.description).trim(), priority: values.priority, status: "te doen", assigned_to: values.assigned_to || null, notify_all: notifyAll, deadline_at: values.deadline_at ? new Date(String(values.deadline_at)).toISOString() : null, created_by: state.user.id };
+    if (!row.title) throw new Error("Geef de taak een titel.");
+    await insertRow("tasks", row);
+    state.managerAction = ""; toast("Taak toegevoegd. De eventruimte is bijgewerkt.");
+  });
+  if (form.dataset.form === "offer-swap") run(async () => {
+    const shiftId = form.dataset.id;
+    if (!mySignup(shiftId)?.assigned_role || isCompleted(shiftOf(shiftId))) throw new Error("Alleen een toekomstige ingedeelde dienst kan worden aangeboden.");
+    if (supa) { const result = await supa.rpc("offer_shift_swap", { p_shift: shiftId, p_note: String(values.note || "").trim() }); if (result.error) throw result.error; }
+    else state.data.shift_swaps.push({ id: crypto.randomUUID(), shift_id: shiftId, from_user: state.user.id, to_user: null, role: mySignup(shiftId).assigned_role, note: String(values.note || "").trim(), status: "offered", created_at: new Date().toISOString() });
+    state.offeringShift = null; await refresh(); toast("Je dienst staat op de marktplaats. De manager moet een overname goedkeuren.");
+  });
+  if (form.dataset.form === "feedback") run(async () => {
+    const shiftId = form.dataset.id;
+    if (!isCompleted(shiftOf(shiftId)) || !mySignup(shiftId)?.available) throw new Error("Feedback kan na je eigen shift worden gegeven.");
+    const row = { user_id: state.user.id, shift_id: shiftId, text: String(values.text || "").trim(), liked: values.liked === "true" };
+    if (supa) { const result = await supa.from("shift_feedback").upsert(row, { onConflict: "user_id,shift_id" }); if (result.error) throw result.error; }
+    else { const old = state.data.shift_feedback.find(x => x.user_id === row.user_id && x.shift_id === shiftId); if (old) Object.assign(old, row); else state.data.shift_feedback.push({ id: crypto.randomUUID(), created_at: new Date().toISOString(), ...row }); }
+    await refresh(); toast("Feedback opgeslagen.");
+  });
   if (form.dataset.form === "document" && isManager()) run(async () => {
-    const file = values.file;
+    const shiftId = String(values.shift_id || form.dataset.id);
+    const file = state.uploadForm === form ? state.uploadFile : values.file;
     if (!(file instanceof File) || !file.name) throw new Error("Kies eerst een bestand.");
     if (file.size > 20 * 1024 * 1024) throw new Error("Bestand mag maximaal 20 MB zijn.");
-    const shift = shiftOf(form.dataset.id), path = `${shift.id}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
-    if (supa) {
-      const upload = await supa.storage.from("crew-documents").upload(path, file, { contentType: file.type || "application/octet-stream", upsert: false });
-      if (upload.error) throw upload.error;
-      try { await insertRow("documents", { shift_id: shift.id, event_id: shift.event_id, title: String(values.title).trim(), file_url: path, file_type: values.file_type, mime_type: file.type || "application/octet-stream", uploaded_by: state.user.id }); }
-      catch (error) { await supa.storage.from("crew-documents").remove([path]); throw error; }
-    } else await insertRow("documents", { shift_id: shift.id, event_id: shift.event_id, title: String(values.title).trim(), file_url: path, file_type: values.file_type, mime_type: file.type || "application/octet-stream", uploaded_by: state.user.id, created_at: new Date().toISOString(), demo_url: URL.createObjectURL(file) });
-    toast("Document toegevoegd.");
+    if (!/\.(pdf|doc|docx|png|jpe?g|webp)$/i.test(file.name)) throw new Error("Gebruik PDF, Word of een afbeelding.");
+    if (state.uploadBusy) return;
+    const duplicate = docsOf(shiftId).some(doc => doc.file_name?.toLowerCase() === file.name.toLowerCase() && doc.file_size === file.size);
+    if (duplicate) throw new Error("Dit bestand staat al bij deze shift.");
+    state.uploadBusy = true;
+    const status = form.querySelector("#upload-status"), submit = form.querySelector('button[type="submit"]');
+    if (status) status.textContent = "Bestand uploaden…";
+    if (submit) submit.disabled = true;
+    const shift = shiftOf(shiftId);
+    if (!shift) throw new Error("Kies eerst een shift.");
+    const path = `${shift.id}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+    try {
+      const row = { shift_id: shift.id, event_id: shift.event_id, title: String(values.title).trim(), file_url: path, file_type: values.file_type, mime_type: file.type || "application/octet-stream", file_name: file.name, file_size: file.size, uploaded_by: state.user.id };
+      if (supa) {
+        const upload = await supa.storage.from("crew-documents").upload(path, file, { contentType: file.type || "application/octet-stream", upsert: false });
+        if (upload.error) throw upload.error;
+        try { const inserted = await supa.from("documents").insert(row); if (inserted.error) throw inserted.error; }
+        catch (error) { await supa.storage.from("crew-documents").remove([path]); throw error; }
+      } else state.data.documents.push({ id: crypto.randomUUID(), created_at: new Date().toISOString(), demo_url: URL.createObjectURL(file), ...row });
+      state.uploadFile = null; state.uploadForm = null;
+      await refresh(); toast("Document toegevoegd.");
+    } finally { state.uploadBusy = false; if (submit?.isConnected) submit.disabled = false; }
+  });
+  if (form.dataset.form === "announcement" && isManager()) run(async () => {
+    const shiftId = String(values.shift_id || "");
+    if (!shiftOf(shiftId)) throw new Error("Kies eerst een shift.");
+    await updateRow("shifts", shiftId, { announcement: String(values.announcement).trim() });
+    state.managerAction = ""; toast("Mededeling geplaatst. De crew krijgt een melding.");
   });
 });
 
@@ -882,7 +1086,9 @@ if (supa) supa.auth.onAuthStateChange((event) => {
     if (supportsPush()) pushRegistration().then(registration => registration.pushManager.getSubscription()).then(subscription => subscription?.unsubscribe()).catch(console.error);
     if (state.roomChannel) supa.removeChannel(state.roomChannel);
     if (state.notificationChannel) supa.removeChannel(state.notificationChannel);
-    state.roomChannel = null; state.roomChannelId = null; state.notificationChannel = null;
+    if (state.dataChannel) supa.removeChannel(state.dataChannel);
+    clearTimeout(state.dataRefreshTimer);
+    state.roomChannel = null; state.roomChannelId = null; state.notificationChannel = null; state.dataChannel = null;
     state.user = null; state.profile = null; state.data = null; state.notifications = []; state.notificationPreferences = null; state.pushEnabled = false;
     if (state.authMode !== "reset") setTimeout(render, 0);
   }
@@ -895,10 +1101,11 @@ window.addEventListener("popstate", render);
 navigator.serviceWorker?.addEventListener("message", event => {
   if (event.data?.type !== "LIEF_NAVIGATE" || typeof event.data.url !== "string") return;
   goPath(safeNotificationTarget(event.data.url));
+  event.ports?.[0]?.postMessage({ ok: true });
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible" || !state.user) return;
-  loadNotifications().then(render).catch(console.error);
+  refreshCurrent().catch(console.error);
   const route = currentRoute();
   if (route.page === "room" && route.id) refreshTasks(route.id).catch(console.error);
 });

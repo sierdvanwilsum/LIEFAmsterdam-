@@ -26,18 +26,25 @@ self.addEventListener("notificationclick", event => {
   } catch { target = new URL("/notifications", scope); }
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-    const existing = windows.find(client => {
+    const eligible = windows.filter(client => {
       try { const url = new URL(client.url); return url.origin === scope.origin && url.pathname.startsWith(scope.pathname); }
       catch { return false; }
     });
+    const existing = eligible.find(client => client.focused) || eligible.find(client => client.visibilityState === "visible") || eligible[0];
     if (existing) {
+      try { await existing.focus(); } catch { /* Navigatie blijft mogelijk. */ }
       try {
-        const navigated = await existing.navigate(target.href);
-        if (navigated) return navigated.focus();
-      } catch { /* Navigatie kan bij een net hervatte PWA mislukken. */ }
-      await existing.focus();
-      existing.postMessage({ type: "LIEF_NAVIGATE", url: target.pathname + target.search + target.hash });
-      return;
+        const acknowledged = await new Promise(resolve => {
+          const channel = new MessageChannel();
+          const timer = setTimeout(() => resolve(false), 1200);
+          channel.port1.onmessage = () => { clearTimeout(timer); resolve(true); };
+          existing.postMessage({ type: "LIEF_NAVIGATE", url: target.pathname + target.search + target.hash }, [channel.port2]);
+        });
+        if (acknowledged) return;
+      } catch { /* Een slapende PWA kan het bericht missen. */ }
+      try { const navigated = await existing.navigate(target.href); if (navigated) return navigated.focus(); }
+      catch { /* Het bestaande venster blijft behouden. */ }
+      try { return await existing.focus(); } catch { return; }
     }
     return self.clients.openWindow(target.href);
   })());
