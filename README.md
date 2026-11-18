@@ -40,6 +40,7 @@ Het officiële logo uit `design-references/image copy Lief Logo 2.png` staat als
 De code en SQL voor push zijn aanwezig, maar **live push werkt pas na deze Supabase-stappen**:
 
 1. Voer na `schema.sql` de versiebeheer-migratie [`20261118140000_notifications_and_marketplace.sql`](supabase/migrations/20261118140000_notifications_and_marketplace.sql) uit in de Supabase SQL Editor. Deze herhaalbare migratie bevat de bestaande wijzigingen uit [`notifications.sql`](supabase/notifications.sql) en [`crew-ux.sql`](supabase/crew-ux.sql): meldingeninbox en RLS, dienstenmarktplaats met manager-goedkeuring, feedback en de bijbehorende UX-kolommen. Bestaande meldingen, shifts en andere data blijven behouden. Voer `schema.sql` niet opnieuw uit.
+   Voer daarna [`20261118170000_marketplace_all_signups.sql`](supabase/migrations/20261118170000_marketplace_all_signups.sql) uit. Daarmee kunnen medewerkers ook een aangemelde shift zonder toegewezen rol via de Dienstenmarktplaats aanbieden. De manager moet een overname nog steeds goedkeuren; een vervanger van een nog niet ingedeelde medewerker blijft na goedkeuring ook nog niet ingedeeld.
 2. De publieke VAPID-sleutel staat in [`config.js`](config.js). De bijbehorende privésleutel en een willekeurig webhookgeheim zijn lokaal gegenereerd in `/private/tmp/lief-crew-push-secrets.env` met bestandsrechten `600`. Bewaar dit bestand veilig; deel de privésleutel of het webhookgeheim niet in chat, browsercode of Git. Bij een nieuwe computer moet je **dezelfde** VAPID-sleutels blijven gebruiken voor bestaande abonnementen.
 3. Koppel de Supabase CLI aan project `wwqyufcpwbrbjcglskko` en stel de vier secrets uit dit bestand in. Voer de commando's uit in de projectmap:
 
@@ -76,4 +77,4 @@ Test daarna op een telefoon met een nieuw medewerkeraccount: aanmelden, mail bev
 - Bestanden in de demomodus zijn alleen tijdens de huidige browsersessie beschikbaar. In Supabase worden ze in de private bucket `crew-documents` opgeslagen.
 - De bestaande mock planner staat nog in `app.js`; de nieuwe app gebruikt `crew.js` als hoofdingang.
 - Zonder uitgevoerde `notifications.sql`, gedeployde `push` Edge Function en ingestelde webhook werken de bestaande planning en eventruimtes wel, maar worden geen pushmeldingen afgeleverd.
-- Voor de nieuwe dienstenmarktplaats, feedback, bestandsdeduplicatie en taakdeadlines moet `supabase/crew-ux.sql` in de SQL Editor zijn uitgevoerd. De app toont anders bij opslaan een duidelijke databasefout.
+- Voor de dienstenmarktplaats, feedback, bestandsdeduplicatie en taakdeadlines moet de bestaande migratie `20261118140000_notifications_and_marketplace.sql` zijn uitgevoerd. Voor het aanbieden van aanmeldingen zonder toegewezen rol is ook `20261118170000_marketplace_all_signups.sql` nodig.

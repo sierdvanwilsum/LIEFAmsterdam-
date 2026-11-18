@@ -277,8 +277,6 @@ a:focus-visible, textarea:focus-visible { outline: 3px solid #6b41bc; outline-of
 .crew-file-drop span, .crew-file-name { color: var(--muted); font-size: 12px; }
 .crew-file-drop input[type=file] { position: absolute; width: 1px; height: 1px; padding: 0; opacity: 0; pointer-events: none; }
 .crew-file-name { margin: 0; overflow-wrap: anywhere; }
-.crew-shift-extra { margin-top: 8px; }
-.crew-shift-extra .crew-button { width: 100%; }
 .crew-past-title, .crew-manager-feedback { margin-top: 32px; }
 .crew-feedback h3 { margin: 0; font: 700 21px var(--serif); }
 .crew-heart { width: 54px; height: 54px; border: 0; border-radius: 50%; background: var(--lilac-soft); color: var(--ink); font-size: 28px; cursor: pointer; transition: transform .2s, background .2s; }
@@ -287,6 +285,10 @@ a:focus-visible, textarea:focus-visible { outline: 3px solid #6b41bc; outline-of
 @keyframes crew-heart-pop { 50% { transform: scale(1.22); } }
 .crew-market-card h2 { margin-top: 8px; }
 .crew-market-card .crew-button { width: 100%; margin-top: 8px; }
+.crew-market-action { margin: 20px 0; }
+.crew-market-action .crew-button { width: 100%; }
+.crew-market-action p { margin: 10px 4px 0; color: var(--muted); font-size: 13px; }
+.crew-market-offer { max-width: 740px; margin-bottom: 28px; }
 @media (max-width: 619px) {
   .crew-form input, .crew-form select, .crew-form textarea, .crew-add-role input, .crew-assign select, .crew-manage-crew select, .crew-role-row input { font-size: 16px; }
   .crew-form-pair { grid-template-columns: minmax(0,1fr); }
