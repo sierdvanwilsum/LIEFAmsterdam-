@@ -8,7 +8,7 @@ const configured = Boolean(supaConfig.url && supaConfig.publishableKey);
 const supa = configured && window.supabase ? window.supabase.createClient(supaConfig.url, supaConfig.publishableKey) : null;
 const roleNames = ["Bar", "Runner", "Debras", "Opbouw", "Afbouw", "Productie", "Garderobe", "Hospitality", "Oempa Loempa", "Routing", "Entertainment support", "Anders"];
 const documentTypes = ["Draaiboek", "Factsheet", "Plattegrond", "Briefing", "Overig"];
-const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: location.pathname === "/auth/reset-password" ? "reset-loading" : location.pathname === "/auth/confirmed" ? "confirmed-loading" : "login", recoveryReady: false, filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, offeringShift: null, roomChannel: null, roomChannelId: null, taskRefreshing: false, taskRefreshId: null, taskRefreshPromise: null, showEventForm: false, managerAction: "", managerEvent: "", managerShift: "", notificationPreferences: null, notificationError: "", notifications: [], notificationsError: "", notificationChannel: null, dataChannel: null, dataRefreshTimer: null, refreshing: false, uploadBusy: false, uploadFile: null, uploadForm: null, pushEnabled: false };
+const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: location.pathname === "/auth/reset-password" ? "reset-loading" : location.pathname === "/auth/confirmed" ? "confirmed-loading" : "login", recoveryReady: false, filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, offeringShift: null, roomChannel: null, roomChannelId: null, taskRefreshing: false, taskRefreshId: null, taskRefreshPromise: null, showEventForm: false, managerAction: "", managerEvent: "", managerShift: "", notificationPreferences: null, notificationError: "", notifications: [], notificationsError: "", notificationChannel: null, dataChannel: null, dataRefreshTimer: null, refreshing: false, extensionsReady: false, uploadBusy: false, uploadFile: null, uploadForm: null, pushEnabled: false };
 const notificationChoices = [
   ["new_tasks", "Nieuwe taken"], ["new_shifts", "Nieuwe shifts"],
   ["shift_accepted", "Shift geaccepteerd"], ["shift_changed", "Shift gewijzigd"],
@@ -71,7 +71,8 @@ function startNotificationChannel() {
 function startDataChannel() {
   if (!supa || !state.user || state.dataChannel) return;
   let channel = supa.channel(`crew-data-${state.user.id}`);
-  for (const table of ["tasks", "documents", "shifts", "shift_roles", "shift_signups", "shift_swaps", "shift_feedback"]) {
+  const tables = state.extensionsReady ? ["tasks", "documents", "shifts", "shift_roles", "shift_signups", "shift_swaps", "shift_feedback"] : ["tasks"];
+  for (const table of tables) {
     for (const event of ["INSERT", "UPDATE"]) channel = channel.on("postgres_changes", { event, schema: "public", table }, () => {
       clearTimeout(state.dataRefreshTimer);
       state.dataRefreshTimer = setTimeout(() => refresh().catch(console.error), 180);
@@ -234,6 +235,9 @@ async function loadData() {
   state.data.occupancy = results[tables.length].data || [];
   state.data.role_occupancy = results[tables.length + 1].data || [];
   const extra = await Promise.all([supa.from("shift_swaps").select("*"), supa.from("shift_feedback").select("*")]);
+  const hadExtensions = state.extensionsReady;
+  state.extensionsReady = extra.every(result => !result.error);
+  if (state.dataChannel && hadExtensions !== state.extensionsReady) { await supa.removeChannel(state.dataChannel); state.dataChannel = null; startDataChannel(); }
   state.data.shift_swaps = extra[0].error ? [] : extra[0].data || [];
   state.data.shift_feedback = extra[1].error ? [] : extra[1].data || [];
 }
@@ -419,7 +423,7 @@ function myShiftsPage() {
 function swapForShift(shiftId) { return state.data.shift_swaps?.find(x => x.shift_id === shiftId && x.from_user === state.user?.id && !["approved", "rejected", "withdrawn"].includes(x.status)); }
 function marketplacePage() {
   const offers = (state.data.shift_swaps || []).filter(x => ["offered", "interested", "pending"].includes(x.status) && shiftOf(x.shift_id) && !isCompleted(shiftOf(x.shift_id)));
-  return shell(`<a class="crew-back" href="#planning">${icon("back", 16)} Terug naar planning</a>${heading("CREW", "Dienstenmarktplaats", "Een dienst overnemen kan pas na goedkeuring van de manager.")}<div class="crew-section-head"><h2>${offers.length} aangeboden</h2>${refreshButton()}</div><div class="crew-shift-grid">${offers.length ? offers.map(x => { const shift = shiftOf(x.shift_id), event = eventOf(shift); return `<article class="crew-white-panel crew-market-card"><span class="eyebrow">${e(dateText(shift.date))} · ${e(shiftTime(shift))}</span><h2>${e(event?.title || "Event")}</h2><p>Rol: <strong>${e(x.role)}</strong></p>${x.note ? `<p>${e(x.note)}</p>` : ""}${isManager() ? `<p>${e(nameOf(x.from_user))} → ${e(x.to_user ? nameOf(x.to_user) : "Nog geen vervanger")}</p>${x.to_user ? `${button("Ruil goedkeuren", "approve-swap", x.id)}${button("Afwijzen", "reject-swap", x.id, "secondary")}` : badge("Aangeboden", "pending")}` : x.from_user === state.user.id ? `${badge("Jouw aanbod", "soft")}${button("Aanbod intrekken", "withdraw-swap", x.id, "secondary")}` : x.to_user === state.user.id ? badge("Wacht op manager", "pending") : !x.to_user && !mySignup(shift.id)?.available ? button("Ik kan deze dienst overnemen", "interest-swap", x.id) : ""}</article>`; }).join("") : empty("Geen aangeboden diensten", "Nieuwe diensten verschijnen hier zodra een collega er een aanbiedt.")}</div>`, "planning");
+  return shell(`<a class="crew-back" href="#planning">${icon("back", 16)} Terug naar planning</a>${heading("CREW", "Dienstenmarktplaats", "Een dienst overnemen kan pas na goedkeuring van de manager.")}${configured && !state.extensionsReady ? `<p class="crew-alert">De dienstenmarktplaats is nog niet geactiveerd. Voer crew-ux.sql uit in Supabase.</p>` : ""}<div class="crew-section-head"><h2>${offers.length} aangeboden</h2>${refreshButton()}</div><div class="crew-shift-grid">${offers.length ? offers.map(x => { const shift = shiftOf(x.shift_id), event = eventOf(shift); return `<article class="crew-white-panel crew-market-card"><span class="eyebrow">${e(dateText(shift.date))} · ${e(shiftTime(shift))}</span><h2>${e(event?.title || "Event")}</h2><p>Rol: <strong>${e(x.role)}</strong></p>${x.note ? `<p>${e(x.note)}</p>` : ""}${isManager() ? `<p>${e(nameOf(x.from_user))} → ${e(x.to_user ? nameOf(x.to_user) : "Nog geen vervanger")}</p>${x.to_user ? `${button("Ruil goedkeuren", "approve-swap", x.id)}${button("Afwijzen", "reject-swap", x.id, "secondary")}` : badge("Aangeboden", "pending")}` : x.from_user === state.user.id ? `${badge("Jouw aanbod", "soft")}${button("Aanbod intrekken", "withdraw-swap", x.id, "secondary")}` : x.to_user === state.user.id ? badge("Wacht op manager", "pending") : !x.to_user && !mySignup(shift.id)?.available ? button("Ik kan deze dienst overnemen", "interest-swap", x.id) : ""}</article>`; }).join("") : empty("Geen aangeboden diensten", "Nieuwe diensten verschijnen hier zodra een collega er een aanbiedt.")}</div>`, "planning");
 }
 function feedbackForm(shift) {
   const item = state.data.shift_feedback?.find(x => x.shift_id === shift.id && x.user_id === state.user.id);
