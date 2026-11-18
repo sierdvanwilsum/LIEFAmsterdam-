@@ -125,12 +125,35 @@ function dayNumber(value) { return dateText(value, { day: "2-digit" }); }
 function monthShort(value) { return dateText(value, { month: "short" }).replace(".", "").toUpperCase(); }
 function timeText(value) { return String(value || "").slice(0, 5); }
 function shiftTime(s) { return `${timeText(s.start_time)} — ${timeText(s.end_time)}`; }
+const amsterdamFormatter = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Amsterdam", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+function amsterdamTime(date, time, preferLate = false) {
+  const [year, month, day] = date.split("-").map(Number);
+  const [hour, minute] = timeText(time).split(":").map(Number);
+  const local = Date.UTC(year, month - 1, day, hour, minute);
+  const candidates = [60, 120].map(offset => {
+    const instant = local - offset * 60000;
+    const parts = Object.fromEntries(amsterdamFormatter.formatToParts(instant).map(part => [part.type, Number(part.value)]));
+    const wallTime = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+    return { instant, difference: wallTime - local };
+  });
+  const exact = candidates.filter(candidate => candidate.difference === 0);
+  if (exact.length) return preferLate ? Math.max(...exact.map(candidate => candidate.instant)) : Math.min(...exact.map(candidate => candidate.instant));
+  return candidates.filter(candidate => candidate.difference > 0).sort((a, b) => a.difference - b.difference)[0]?.instant ?? candidates[0].instant;
+}
+function shiftStart(shift) { return amsterdamTime(shift.date, shift.start_time); }
 function shiftEnd(shift) {
-  const end = new Date(`${shift.date}T${timeText(shift.end_time)}:00`);
-  if (timeText(shift.end_time) <= timeText(shift.start_time)) end.setDate(end.getDate() + 1);
-  return end;
+  const date = new Date(`${shift.date}T12:00:00Z`);
+  if (timeText(shift.end_time) <= timeText(shift.start_time)) date.setUTCDate(date.getUTCDate() + 1);
+  return new Date(amsterdamTime(date.toISOString().slice(0, 10), shift.end_time, true));
 }
 function isCompleted(shift) { return shiftEnd(shift).getTime() < Date.now(); }
+function plannedMinutes(shift) { return Math.round((shiftEnd(shift).getTime() - shiftStart(shift)) / 60000); }
+function workedMinutes(signup, shift) { return Number.isFinite(Number(signup.worked_minutes)) && signup.worked_minutes != null ? Number(signup.worked_minutes) : plannedMinutes(shift); }
+function hoursText(minutes) { return `${new Intl.NumberFormat("nl-NL", { maximumFractionDigits: 2 }).format(minutes / 60)} uur`; }
+function workedSignups(shift) { return signupsOf(shift.id).filter(item => item.assigned_role); }
+function feedbackOf(shiftId, userId) { return state.data.shift_feedback?.find(item => item.shift_id === shiftId && item.user_id === userId); }
+function ratingOf(item) { return Number.isInteger(item?.rating) && item.rating >= 1 && item.rating <= 5 ? item.rating : null; }
+function hearts(score) { return score ? `<span class="crew-rating-display" aria-label="${score} van 5 hartjes">${"♥".repeat(score)}<span>${"♡".repeat(5 - score)}</span></span>` : "—"; }
 function isManager() { return state.profile?.role === "manager"; }
 function firstName() { return state.profile?.full_name?.trim().split(/\s+/)[0] || "collega"; }
 function profile(id) { return state.data?.profiles.find(p => p.id === id); }
@@ -191,7 +214,7 @@ function toast(message) {
 }
 function getError(error) {
   if (error?.code === "23505") return "Dit onderdeel bestaat al.";
-  if (["42P01", "42703", "PGRST204", "PGRST205"].includes(error?.code)) return "De nieuwe database-onderdelen ontbreken nog. Voer crew-ux.sql uit in Supabase.";
+  if (["42P01", "42703", "PGRST204", "PGRST205"].includes(error?.code)) return "De nieuwe database-onderdelen ontbreken nog. Voer de nieuwste Supabase-migraties uit.";
   if (/invalid login credentials/i.test(error?.message || "")) return "E-mailadres of wachtwoord klopt niet.";
   if (/email not confirmed/i.test(error?.message || "")) return "Bevestig eerst je e-mailadres.";
   if (/email_address_not_authorized|email address not authorized/i.test(`${error?.code || ""} ${error?.message || ""}`)) return "Dit e-mailadres kan nog geen mail ontvangen. Vraag de beheerder om de e-mailinstellingen te controleren.";
@@ -416,7 +439,12 @@ function myShiftsPage() {
   const own = orderedShifts().filter(shift => mySignup(shift.id)?.available);
   const future = own.filter(shift => !isCompleted(shift));
   const past = own.filter(isCompleted).reverse();
-  return shell(`${heading("PERSOONLIJK ROOSTER", "Mijn shifts", "Alle diensten waarvoor jij je hebt aangemeld.")}<div class="crew-section-head"><h2>Aankomend</h2>${refreshButton()}</div><p><a class="crew-text-link" href="#marketplace">Bekijk dienstenmarktplaats ${icon("arrow", 15)}</a></p><div class="crew-shift-grid">${future.length ? future.map(shift => shiftCard(shift, { room: true })).join("") : empty("Nog geen aankomende shifts", "Bekijk de planning voor beschikbare diensten.", "planning", "Bekijk planning")}</div><div class="crew-section-head crew-past-title"><h2>Afgerond</h2></div><div class="crew-shift-grid">${past.length ? past.map(shift => `<div>${shiftCard(shift, { room: true })}<div class="crew-white-panel">${feedbackForm(shift)}</div></div>`).join("") : empty("Nog geen afgeronde shifts", "Na je eerste dienst kun je hier kort feedback geven.")}</div>`, "shifts");
+  return shell(`${heading("PERSOONLIJK ROOSTER", "Mijn shifts", "Alle diensten waarvoor jij je hebt aangemeld.")}<div class="crew-overview-link">${button("Mijn uren", "go", "hours")}</div><div class="crew-section-head"><h2>Aankomend</h2>${refreshButton()}</div><p><a class="crew-text-link" href="#marketplace">Bekijk dienstenmarktplaats ${icon("arrow", 15)}</a></p><div class="crew-shift-grid">${future.length ? future.map(shift => shiftCard(shift, { room: true })).join("") : empty("Nog geen aankomende shifts", "Bekijk de planning voor beschikbare diensten.", "planning", "Bekijk planning")}</div><div class="crew-section-head crew-past-title"><h2>Afgerond</h2></div><div class="crew-compact-list">${past.length ? past.map(shift => `<details class="crew-completed-item"><summary><span>${e(dateText(shift.date, { day: "numeric", month: "short" }))}</span><strong>${e(eventOf(shift)?.title || shift.title)}</strong><span>${e(shiftTime(shift))}</span><span>${feedbackOf(shift.id, state.user.id) ? "Feedback aanpassen" : "Feedback geven"}</span></summary><div class="crew-completed-body">${feedbackForm(shift)}</div></details>`).join("") : empty("Nog geen afgeronde shifts", "Na je eerste dienst kun je hier kort feedback geven.")}</div>`, "shifts");
+}
+function myHoursPage() {
+  const entries = orderedShifts().filter(shift => isCompleted(shift) && mySignup(shift.id)?.available && mySignup(shift.id)?.assigned_role).reverse();
+  const total = entries.reduce((sum, shift) => sum + workedMinutes(mySignup(shift.id), shift), 0);
+  return shell(`<a class="crew-back" href="#shifts">${icon("back", 16)} Terug naar mijn shifts</a>${heading("PERSOONLIJK ROOSTER", "Mijn uren", "Je afgeronde en ingedeelde diensten.")}<div class="crew-hours-total"><span>Totaal gewerkt</span><strong>${hoursText(total)}</strong></div>${entries.length ? `<div class="crew-data-table crew-hours-table"><div class="crew-data-head"><span>Datum</span><span>Event</span><span>Rol</span><span>Tijd</span><span>Uren</span></div>${entries.map(shift => { const signup = mySignup(shift.id); return `<div class="crew-data-row"><span data-label="Datum">${e(dateText(shift.date, { day: "numeric", month: "short" }))}</span><strong data-label="Event">${e(eventOf(shift)?.title || shift.title)}</strong><span data-label="Rol">${e(signup.assigned_role)}</span><span data-label="Tijd">${e(timeText(shift.start_time))}–${e(timeText(shift.end_time))}</span><strong data-label="Uren">${hoursText(workedMinutes(signup, shift))}</strong></div>`; }).join("")}</div>` : empty("Nog geen gewerkte uren", "Na je eerste afgeronde en ingedeelde shift verschijnen je uren hier.")}`, "shifts");
 }
 function swapForShift(shiftId) { return state.data.shift_swaps?.find(x => x.shift_id === shiftId && x.from_user === state.user?.id && !["approved", "rejected", "withdrawn"].includes(x.status)); }
 function offerableShifts() {
@@ -430,7 +458,8 @@ function marketplacePage() {
 }
 function feedbackForm(shift) {
   const item = state.data.shift_feedback?.find(x => x.shift_id === shift.id && x.user_id === state.user.id);
-  return `<form data-form="feedback" data-id="${e(shift.id)}" class="crew-form crew-feedback"><h3>Hoe was je shift?</h3><button type="button" class="crew-heart ${item?.liked ? "active" : ""}" data-action="toggle-heart" data-id="${e(shift.id)}" aria-label="${item?.liked ? "LIEF-hartje weghalen" : "LIEF-hartje geven"}" aria-pressed="${Boolean(item?.liked)}"><span class="crew-heart-logo" aria-hidden="true"></span></button><input type="hidden" name="liked" value="${Boolean(item?.liked)}"/><label>Korte reactie <small>(optioneel)</small><textarea name="text" maxlength="1000" placeholder="Wat ging goed of kan beter?">${e(item?.text || "")}</textarea></label><button class="crew-button primary" type="submit"><span>Feedback opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form>`;
+  const rating = ratingOf(item) || 0;
+  return `<form data-form="feedback" data-id="${e(shift.id)}" class="crew-form crew-feedback"><h3>Hoe was je shift?</h3><fieldset class="crew-heart-field"><legend>Beoordeling</legend><div class="crew-heart-options">${[1, 2, 3, 4, 5].map(score => `<button type="button" class="crew-heart ${score <= rating ? "active" : ""}" data-action="select-heart" data-score="${score}" aria-label="${score} ${score === 1 ? "hartje" : "hartjes"}" aria-pressed="${score === rating}"><span aria-hidden="true">${score <= rating ? "♥" : "♡"}</span></button>`).join("")}</div></fieldset><input type="hidden" name="rating" value="${rating}"/><label>Wil je nog iets meegeven?<textarea name="feedback_text" maxlength="1000" placeholder="Schrijf hier je feedback">${e(item?.feedback_text ?? item?.text ?? "")}</textarea></label><button class="crew-button primary" type="submit"><span>Feedback versturen</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form>`;
 }
 
 function roomsPage() {
@@ -547,7 +576,7 @@ function managerPage() {
   const openTasks = state.data.tasks.filter(task => task.status !== "klaar");
   const openPlaces = upcomingShifts().reduce((sum, shift) => sum + openOf(shift), 0);
   const stats = [[upcoming.length, "Aankomende events"], [openShifts, "Open shifts"], [openPlaces, "Open plekken"], [openTasks.length, "Open taken"], [openTasks.filter(t => t.priority === "urgent").length, "Urgente taken"]];
-  return shell(`<div class="crew-manager-title">${heading("MANAGER · LIEF AMSTERDAM", "Crew en events.", "De belangrijkste acties en bezetting direct in beeld.")}${refreshButton()}</div><div class="crew-manager-actions">${[["staff", "Personeel inplannen"], ["event", "Nieuw event"], ["shift", "Shift toevoegen"], ["task", "Taak toevoegen"], ["document", "Document toevoegen"], ["announcement", "Nieuwe mededeling"]].map(([key, label]) => button(label, "manager-action", key, key === "staff" ? "primary" : "secondary")).join("")}</div>${managerQuickAction()}${managerSwaps()}<div class="crew-manager-stats">${stats.map(([value, label], index) => `<div class="${index === 4 ? "accent" : ""}"><strong>${value}</strong><span>${label}</span></div>`).join("")}</div><div class="crew-section-head" id="manager-events"><h2>Aankomende events</h2><button type="button" class="crew-small-button" data-action="new-event">${icon("plus", 16)} Nieuw event</button></div><div class="crew-manager-event-grid">${upcoming.length ? upcoming.map(eventCardManager).join("") : empty("Nog geen events", "Maak het eerste event aan om shifts te plannen.")}</div>${managerFeedback()}`, "manager");
+  return shell(`<div class="crew-manager-title">${heading("MANAGER · LIEF AMSTERDAM", "Crew en events.", "De belangrijkste acties en bezetting direct in beeld.")}${refreshButton()}</div><div class="crew-overview-link">${button("Feedback & afgeronde events", "go", "completed")}</div><div class="crew-manager-actions">${[["staff", "Personeel inplannen"], ["event", "Nieuw event"], ["shift", "Shift toevoegen"], ["task", "Taak toevoegen"], ["document", "Document toevoegen"], ["announcement", "Nieuwe mededeling"]].map(([key, label]) => button(label, "manager-action", key, key === "staff" ? "primary" : "secondary")).join("")}</div>${managerQuickAction()}${managerSwaps()}<div class="crew-manager-stats">${stats.map(([value, label], index) => `<div class="${index === 4 ? "accent" : ""}"><strong>${value}</strong><span>${label}</span></div>`).join("")}</div><div class="crew-section-head" id="manager-events"><h2>Aankomende events</h2><button type="button" class="crew-small-button" data-action="new-event">${icon("plus", 16)} Nieuw event</button></div><div class="crew-manager-event-grid">${upcoming.length ? upcoming.map(eventCardManager).join("") : empty("Nog geen events", "Maak het eerste event aan om shifts te plannen.")}</div>${managerFeedback()}`, "manager");
 }
 function managerSwaps() {
   const items = [...(state.data.shift_swaps || [])].sort((a,b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0,20);
@@ -556,9 +585,21 @@ function managerSwaps() {
   return `<section class="crew-manager-feedback"><div class="crew-section-head"><h2>Dienstenmarktplaats</h2>${badge(`${items.filter(x => x.status === "pending").length} ter goedkeuring`, "open")}</div><div class="crew-member-grid">${items.map(x => `<article class="crew-white-panel"><strong>${e(eventOf(shiftOf(x.shift_id))?.title || "Event")} · ${e(x.role)}</strong><p>${e(nameOf(x.from_user))} → ${e(x.to_user ? nameOf(x.to_user) : "Nog geen vervanger")}</p>${badge(names[x.status] || x.status, x.status === "pending" ? "open" : "soft")}${x.status === "pending" ? `${button("Goedkeuren", "approve-swap", x.id)}${button("Afwijzen", "reject-swap", x.id, "secondary")}` : ""}</article>`).join("")}</div></section>`;
 }
 function managerFeedback() {
-  const items = state.data.shift_feedback || [];
+  const items = [...(state.data.shift_feedback || [])].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 10);
   if (!items.length) return "";
-  return `<section class="crew-manager-feedback"><div class="crew-section-head"><h2>Feedback na shifts</h2></div><div class="crew-member-grid">${items.slice(0, 10).map(x => `<article class="crew-white-panel"><strong>${e(nameOf(x.user_id))} · ${e(eventOf(shiftOf(x.shift_id))?.title || "Event")}</strong><p>${x.liked ? "♥ · " : ""}${e(x.text || "Geen toelichting")}</p></article>`).join("")}</div></section>`;
+  return `<section class="crew-manager-feedback"><div class="crew-section-head"><h2>Recente feedback</h2><a href="#completed">Alle afgeronde shifts ${icon("arrow", 15)}</a></div><div class="crew-feedback-list">${items.map(item => `<div class="crew-feedback-row"><strong>${e(nameOf(item.user_id))} · ${e(eventOf(shiftOf(item.shift_id))?.title || "Event")}</strong><span>${hearts(ratingOf(item))}</span><p>${e(item.feedback_text ?? item.text ?? "") || "Geen geschreven feedback"}</p><time>${e(dateTimeText(item.created_at))}</time></div>`).join("")}</div></section>`;
+}
+function completedShifts() { return orderedShifts().filter(isCompleted).reverse(); }
+function completedPage() {
+  const shifts = completedShifts();
+  return shell(`<a class="crew-back" href="#manager">${icon("back", 16)} Terug naar dashboard</a>${heading("MANAGER · OVERZICHT", "Feedback & afgeronde events", "Gewerkte uren en feedback per afgeronde shift.")}${refreshButton()}${shifts.length ? `<div class="crew-data-table crew-completed-table"><div class="crew-data-head"><span>Datum</span><span>Event · shift</span><span>Start</span><span>Eind</span><span>Medewerkers</span><span>Totaal uren</span><span>Gem. beoordeling</span></div>${shifts.map(shift => { const members = workedSignups(shift), ratings = (state.data.shift_feedback || []).filter(item => item.shift_id === shift.id).map(ratingOf).filter(Boolean); const average = ratings.length ? (ratings.reduce((sum, score) => sum + score, 0) / ratings.length).toFixed(1).replace(".", ",") + " / 5" : "—"; return `<a class="crew-data-row" href="#completed/${e(shift.id)}"><span data-label="Datum">${e(dateText(shift.date, { day: "numeric", month: "short", year: "numeric" }))}</span><strong data-label="Event">${e(eventOf(shift)?.title || "Event")} <small>· ${e(shift.title)}</small></strong><span data-label="Start">${e(timeText(shift.start_time))}</span><span data-label="Eind">${e(timeText(shift.end_time))}</span><span data-label="Medewerkers">${members.length}</span><span data-label="Totaal uren">${hoursText(members.reduce((sum, signup) => sum + workedMinutes(signup, shift), 0))}</span><strong data-label="Gem. beoordeling">${average}</strong></a>`; }).join("")}</div>` : empty("Nog geen afgeronde shifts", "Afgeronde diensten verschijnen hier automatisch.")}`, "manager");
+}
+function completedDetailPage(shift) {
+  const members = workedSignups(shift);
+  const feedback = (state.data.shift_feedback || []).filter(item => item.shift_id === shift.id).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  const total = members.reduce((sum, signup) => sum + workedMinutes(signup, shift), 0);
+  const eventTotal = completedShifts().filter(item => item.event_id === shift.event_id).reduce((sum, item) => sum + workedSignups(item).reduce((subtotal, signup) => subtotal + workedMinutes(signup, item), 0), 0);
+  return shell(`<a class="crew-back" href="#completed">${icon("back", 16)} Terug naar afgeronde events</a>${heading("AFGERONDE SHIFT", eventOf(shift)?.title || shift.title, `${shift.title} · ${dateText(shift.date)} · ${shiftTime(shift)}`)}<div class="crew-hours-total"><span>Totaal uren shift</span><strong>${hoursText(total)}</strong><small>${members.length} gewerkte medewerkers · Totaal uren event: ${hoursText(eventTotal)}</small></div><section class="crew-completed-section"><h2>Medewerkers</h2>${members.length ? `<div class="crew-data-table crew-member-hours-table"><div class="crew-data-head"><span>Naam</span><span>Rol</span><span>Start</span><span>Eind</span><span>Gewerkte uren</span><span>Beoordeling</span></div>${members.map(signup => `<div class="crew-data-row"><strong data-label="Naam">${e(nameOf(signup.user_id))}</strong><span data-label="Rol">${e(signup.assigned_role)}</span><span data-label="Start">${e(timeText(shift.start_time))}</span><span data-label="Eind">${e(timeText(shift.end_time))}</span><strong data-label="Gewerkte uren">${hoursText(workedMinutes(signup, shift))}</strong><span data-label="Beoordeling">${hearts(ratingOf(feedbackOf(shift.id, signup.user_id)))}</span></div>`).join("")}</div>` : `<p class="crew-compact-empty">Geen ingedeelde medewerkers voor deze shift.</p>`}</section><section class="crew-completed-section"><h2>Feedback</h2>${feedback.length ? `<div class="crew-feedback-list">${feedback.map(item => `<div class="crew-feedback-row"><strong>${e(nameOf(item.user_id))}</strong><span>${hearts(ratingOf(item))}</span><p>${e(item.feedback_text ?? item.text ?? "") || "Geen geschreven feedback"}</p><time>${e(dateTimeText(item.created_at))}</time></div>`).join("")}</div>` : `<p class="crew-compact-empty">Nog geen feedback ontvangen.</p>`}</section>`, "manager");
 }
 function shiftManagePanel(shift) {
   const members = signupsOf(shift.id);
@@ -587,12 +628,14 @@ function render() {
   else if (page === "room") root.innerHTML = roomPage(shift, tab);
   else if (page === "signup" && shift) root.innerHTML = signupPage(shift);
   else if (page === "shifts") root.innerHTML = myShiftsPage();
+  else if (page === "hours") root.innerHTML = myHoursPage();
   else if (page === "rooms") root.innerHTML = roomsPage();
   else if (page === "planning") root.innerHTML = planningPage();
   else if (page === "marketplace") root.innerHTML = marketplacePage();
   else if (page === "notifications") root.innerHTML = notificationsPage();
   else if (page === "profile") root.innerHTML = profilePage();
   else if (page === "manager" && isManager()) root.innerHTML = managerPage();
+  else if (page === "completed" && isManager()) root.innerHTML = shift && isCompleted(shift) ? completedDetailPage(shift) : completedPage();
   else if (page === "manage" && event && isManager()) root.innerHTML = manageEventPage(event);
   else root.innerHTML = homePage();
   document.title = `${page === "room" ? "Eventruimte" : page === "manager" ? "Manager" : page === "notifications" ? "Meldingen" : "Crew"} · LIEF Amsterdam`;
@@ -660,9 +703,21 @@ root.addEventListener("click", event => {
   }
   if (action === "remove-shift-role") { target.closest(".crew-new-role-row")?.remove(); updateShiftTotal(); }
   if (action === "toggle-market-offer" && !isManager()) { state.marketplaceOfferOpen = !state.marketplaceOfferOpen; render(); if (state.marketplaceOfferOpen) document.querySelector(".crew-market-offer")?.scrollIntoView({ block: "start" }); }
-  if (action === "toggle-heart") {
-    const button = target, input = button.closest("form")?.querySelector('[name="liked"]');
-    if (input) { input.value = input.value === "true" ? "false" : "true"; button.classList.toggle("active", input.value === "true"); button.setAttribute("aria-pressed", input.value); }
+  if (action === "select-heart") {
+    const form = target.closest("form"), input = form?.querySelector('[name="rating"]');
+    const score = Number(target.dataset.score);
+    if (input && score >= 1 && score <= 5) {
+      input.value = String(score);
+      form.querySelectorAll(".crew-heart").forEach(button => {
+        const selected = Number(button.dataset.score) <= score;
+        button.classList.toggle("active", selected);
+        button.classList.remove("just-selected");
+        button.querySelector("span").textContent = selected ? "♥" : "♡";
+        button.setAttribute("aria-pressed", String(Number(button.dataset.score) === score));
+      });
+      void target.offsetWidth;
+      target.classList.add("just-selected");
+    }
   }
   if (["interest-swap", "withdraw-swap", "approve-swap", "reject-swap"].includes(action)) run(async () => {
     if (!supa) {
@@ -1069,9 +1124,12 @@ root.addEventListener("submit", event => {
   if (form.dataset.form === "feedback") run(async () => {
     const shiftId = form.dataset.id;
     if (!isCompleted(shiftOf(shiftId)) || !mySignup(shiftId)?.available) throw new Error("Feedback kan na je eigen shift worden gegeven.");
-    const row = { user_id: state.user.id, shift_id: shiftId, text: String(values.text || "").trim(), liked: values.liked === "true" };
+    const rating = Number(values.rating);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new Error("Kies eerst 1 tot 5 hartjes.");
+    const now = new Date().toISOString();
+    const row = { user_id: state.user.id, shift_id: shiftId, rating, feedback_text: String(values.feedback_text || "").trim() };
     if (supa) { const result = await supa.from("shift_feedback").upsert(row, { onConflict: "user_id,shift_id" }); if (result.error) throw result.error; }
-    else { const old = state.data.shift_feedback.find(x => x.user_id === row.user_id && x.shift_id === shiftId); if (old) Object.assign(old, row); else state.data.shift_feedback.push({ id: crypto.randomUUID(), created_at: new Date().toISOString(), ...row }); }
+    else { const old = state.data.shift_feedback.find(x => x.user_id === row.user_id && x.shift_id === shiftId); if (old) Object.assign(old, row, { updated_at: now }); else state.data.shift_feedback.push({ id: crypto.randomUUID(), created_at: now, updated_at: now, ...row }); }
     await refresh(); toast("Feedback opgeslagen.");
   });
   if (form.dataset.form === "document" && isManager()) run(async () => {
@@ -1139,5 +1197,11 @@ document.addEventListener("visibilitychange", () => {
   const route = currentRoute();
   if (route.page === "room" && route.id) refreshTasks(route.id).catch(console.error);
 });
+setInterval(() => {
+  if (!state.user || document.visibilityState !== "visible") return;
+  if (!["shifts", "hours", "completed", "manager"].includes(currentRoute().page)) return;
+  if (document.activeElement?.closest("form")) return;
+  render();
+}, 60000);
 if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(console.error);
 bootstrap().catch(error => { console.error(error); root.innerHTML = `<div class="crew-gateway"><h1>App kon niet starten</h1><p>${e(getError(error))}</p></div>`; });

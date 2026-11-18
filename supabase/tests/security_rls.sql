@@ -18,6 +18,7 @@ declare
   v_event uuid := gen_random_uuid();
   v_shift uuid := gen_random_uuid();
   v_draft_shift uuid := gen_random_uuid();
+  v_past_shift uuid := gen_random_uuid();
   v_task uuid := gen_random_uuid();
   v_document uuid := gen_random_uuid();
   v_swap uuid := gen_random_uuid();
@@ -37,6 +38,7 @@ begin
   perform set_config('audit.event', v_event::text, true);
   perform set_config('audit.shift', v_shift::text, true);
   perform set_config('audit.draft_shift', v_draft_shift::text, true);
+  perform set_config('audit.past_shift', v_past_shift::text, true);
   perform set_config('audit.task', v_task::text, true);
   perform set_config('audit.document', v_document::text, true);
   perform set_config('audit.swap', v_swap::text, true);
@@ -58,13 +60,26 @@ begin
 
   perform set_config('request.jwt.claim.sub', v_manager::text, true);
   insert into public.events (id, title, type, description, location, start_date, end_date, manager_id)
-  values (v_event, 'Temporary security test', 'Test', '', 'Test', current_date + 30, current_date + 30, v_manager);
+  values (v_event, 'Temporary security test', 'Test', '', 'Test', current_date - 2, current_date + 31, v_manager);
   insert into public.shifts (id, event_id, title, date, start_time, end_time, required_people, published)
   values
     (v_shift, v_event, 'Published security fixture', current_date + 30, '09:00', '10:00', 99, true),
-    (v_draft_shift, v_event, 'Draft security fixture', current_date + 31, '09:00', '10:00', 99, false);
+    (v_draft_shift, v_event, 'Draft security fixture', current_date + 31, '09:00', '10:00', 99, false),
+    (v_past_shift, v_event, 'Completed overnight fixture', current_date - 2, '17:00', '02:00', 2, true);
+  insert into public.shift_roles (shift_id, name, required_count)
+  values (v_past_shift, 'Bar', 1), (v_past_shift, 'Runner', 1);
   insert into public.shift_signups (shift_id, user_id, available)
   values (v_shift, v_employee_a, true);
+  insert into public.shift_signups (shift_id, user_id, available, assigned_role, status)
+  values (v_past_shift, v_employee_a, true, 'Bar', 'bevestigd'),
+    (v_past_shift, v_employee_b, true, 'Runner', 'bevestigd');
+  perform set_config('request.jwt.claim.sub', v_employee_a::text, true);
+  insert into public.shift_feedback (shift_id, user_id, rating, feedback_text)
+  values (v_past_shift, v_employee_a, 1, 'Eigen feedback');
+  perform set_config('request.jwt.claim.sub', v_employee_b::text, true);
+  insert into public.shift_feedback (shift_id, user_id, rating, feedback_text)
+  values (v_past_shift, v_employee_b, 5, 'Feedback van collega');
+  perform set_config('request.jwt.claim.sub', v_manager::text, true);
   insert into public.tasks (id, shift_id, title, description, created_by)
   values (v_task, v_shift, 'Temporary security task', 'Before manager update', v_manager);
   insert into public.documents (id, shift_id, event_id, title, file_url, file_type, uploaded_by)
@@ -148,6 +163,20 @@ begin
   insert into security_test_results values ('employee A sees own notification', '1 notification', v_count::text, v_count = 1, 'geen');
   select count(*) into v_count from public.notifications where source_key = current_setting('audit.key') || '-b';
   insert into security_test_results values ('employee A cannot see B notification', '0 notifications', v_count::text, v_count = 0, 'geen');
+  select count(*) into v_count from public.shift_signups
+    where shift_id = current_setting('audit.past_shift')::uuid and user_id = current_setting('audit.employee_b')::uuid;
+  insert into security_test_results values ('employee A cannot query coworker completed hours', '0 signups', v_count::text, v_count = 0, 'geen');
+  select count(*) into v_count from public.shift_feedback
+    where shift_id = current_setting('audit.past_shift')::uuid and user_id = current_setting('audit.employee_b')::uuid;
+  insert into security_test_results values ('employee A cannot query coworker feedback', '0 feedback', v_count::text, v_count = 0, 'geen');
+  update public.shift_feedback set rating = 1
+    where shift_id = current_setting('audit.past_shift')::uuid and user_id = current_setting('audit.employee_b')::uuid;
+  get diagnostics v_rows = row_count;
+  insert into security_test_results values ('employee A cannot edit coworker feedback', '0 updated', v_rows::text, v_rows = 0, 'geen');
+  update public.shift_feedback set rating = 5, feedback_text = 'Aangepast'
+    where shift_id = current_setting('audit.past_shift')::uuid and user_id = auth.uid();
+  get diagnostics v_rows = row_count;
+  insert into security_test_results values ('employee A edits own feedback', '1 updated', v_rows::text, v_rows = 1, 'geen');
 
   update public.notifications set read_at = now()
   where source_key = current_setting('audit.key') || '-a' and user_id = auth.uid();
@@ -224,6 +253,10 @@ begin
   end if;
   select count(*) into v_count from public.shifts where id = current_setting('audit.draft_shift')::uuid;
   insert into security_test_results values ('manager sees draft shift', '1 shift', v_count::text, v_count = 1, 'geen');
+  select count(*) into v_count from public.shift_signups where shift_id = current_setting('audit.past_shift')::uuid;
+  insert into security_test_results values ('manager sees all completed employees', '2 signups', v_count::text, v_count = 2, 'geen');
+  select count(*) into v_count from public.shift_feedback where shift_id = current_setting('audit.past_shift')::uuid;
+  insert into security_test_results values ('manager sees all completed feedback', '2 feedback', v_count::text, v_count = 2, 'geen');
   select count(*) into v_count from public.tasks where id = current_setting('audit.task')::uuid;
   insert into security_test_results values ('manager sees task', '1 task', v_count::text, v_count = 1, 'geen');
   update public.events set title = title || ' manager-test' where id = current_setting('audit.event')::uuid;
