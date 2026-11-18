@@ -30,7 +30,7 @@ eval(source + `
   state.data = {
     events: [{ id: "event", title: "Willy Wonka" }], shifts: [dayShift, nightShift, futureShift],
     shift_signups: [
-      { id: "signup-a-day", shift_id: "day", user_id: "a", available: true, assigned_role: "Bar" },
+      { id: "signup-a-day", shift_id: "day", user_id: "a", available: true, assigned_role: null },
       { id: "signup-a-night", shift_id: "night", user_id: "a", available: true, assigned_role: "Runner" },
       { id: "signup-b-night", shift_id: "night", user_id: "b", available: true, assigned_role: "Bar" },
       { id: "signup-a-future", shift_id: "future", user_id: "a", available: true, assigned_role: "Bar" }
@@ -42,6 +42,7 @@ eval(source + `
   };
   const ownHours = myHoursPage();
   check("Mijn uren toont eigen afgeronde diensten", ownHours.includes("17:00–02:00") && ownHours.includes("17 uur"));
+  check("afgeronde aanmelding zonder rol blijft zichtbaar", ownHours.includes("Niet ingedeeld") && (ownHours.match(/class="crew-data-row"/g) || []).length === 2);
   check("Mijn uren verbergt toekomstige diensten", !ownHours.includes("Toekomst"));
   check("Mijn uren verbergt collega", !ownHours.includes("Daan"));
   check("één hartje in formulier", feedbackForm(nightShift).includes('name="rating" value="1"'));
@@ -59,6 +60,7 @@ eval(source + `
   check("manager ziet gemiddeld 3 hartjes", overview.includes("3,0 / 5"));
   const detail = completedDetailPage(nightShift);
   check("manager ziet beide medewerkers en 18 uur", detail.includes("Noor") && detail.includes("Daan") && detail.includes("18 uur"));
+  check("manager ziet medewerker zonder toegewezen rol", completedDetailPage(dayShift).includes("Niet ingedeeld"));
   check("manager ziet feedback bij juiste shift", detail.includes("Goed") && detail.includes("Top"));
   async function testPersistence() {
     state.profile.role = "employee";

@@ -152,6 +152,9 @@ a:focus-visible, textarea:focus-visible { outline: 3px solid #6b41bc; outline-of
 .crew-profile-card + .crew-white-panel { max-width: 600px; }
 .crew-profile-card + .crew-white-panel .crew-button { width: 100%; margin-top: 15px; }
 .crew-profile-details { max-width: 600px; }
+.crew-profile-details .crew-facts { grid-template-columns: minmax(0,1fr); }
+.crew-profile-details .crew-facts > div { min-width: 0; }
+.crew-profile-details .crew-facts strong { display: block; overflow-wrap: anywhere; }
 .crew-notifications { max-width: 600px; margin-top: 15px; }
 .crew-notifications .crew-section-head { align-items: flex-start; flex-wrap: wrap; }
 .crew-notifications .crew-section-head h2 { margin: 0; }
