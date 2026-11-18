@@ -297,7 +297,7 @@ a:focus-visible, textarea:focus-visible { outline: 3px solid #6b41bc; outline-of
 }
 @media (min-width: 620px) { .crew-manager-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (min-width: 620px) { .crew-home-shortcuts { grid-template-columns: repeat(2, minmax(0,1fr)); } }
-@media (min-width: 1000px) { .crew-manager-actions { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+@media (min-width: 1000px) { .crew-manager-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 
 @media (max-width: 359px) {
   .crew-brand-copy small { display: none; }
