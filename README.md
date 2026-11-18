@@ -39,8 +39,7 @@ Het officiële logo uit `design-references/image copy Lief Logo 2.png` staat als
 
 De code en SQL voor push zijn aanwezig, maar **live push werkt pas na deze Supabase-stappen**:
 
-1. Voer [`supabase/notifications.sql`](supabase/notifications.sql) uit in de SQL Editor, na `schema.sql`. **Voer dit script opnieuw uit als push al eerder is ingericht**: het is herhaalbaar en voegt `read_at`, de inbox-RLS, Realtime voor meldingen en nieuwe doellinks aan bestaande installaties toe. Bestaande meldingen en shifts blijven bestaan.
-   Voer daarna [`supabase/crew-ux.sql`](supabase/crew-ux.sql) uit. Dit voegt veilige dienstenruilen, feedback, shiftlocaties, taakdeadlines en bestandscontrole toe. Het script breidt de Realtime-publicatie uit; bestaande data blijft staan. Voer `schema.sql` niet opnieuw uit.
+1. Voer na `schema.sql` de versiebeheer-migratie [`20261118140000_notifications_and_marketplace.sql`](supabase/migrations/20261118140000_notifications_and_marketplace.sql) uit in de Supabase SQL Editor. Deze herhaalbare migratie bevat de bestaande wijzigingen uit [`notifications.sql`](supabase/notifications.sql) en [`crew-ux.sql`](supabase/crew-ux.sql): meldingeninbox en RLS, dienstenmarktplaats met manager-goedkeuring, feedback en de bijbehorende UX-kolommen. Bestaande meldingen, shifts en andere data blijven behouden. Voer `schema.sql` niet opnieuw uit.
 2. De publieke VAPID-sleutel staat in [`config.js`](config.js). De bijbehorende privésleutel en een willekeurig webhookgeheim zijn lokaal gegenereerd in `/private/tmp/lief-crew-push-secrets.env` met bestandsrechten `600`. Bewaar dit bestand veilig; deel de privésleutel of het webhookgeheim niet in chat, browsercode of Git. Bij een nieuwe computer moet je **dezelfde** VAPID-sleutels blijven gebruiken voor bestaande abonnementen.
 3. Koppel de Supabase CLI aan project `wwqyufcpwbrbjcglskko` en stel de vier secrets uit dit bestand in. Voer de commando's uit in de projectmap:
 
