@@ -8,7 +8,7 @@ const configured = Boolean(supaConfig.url && supaConfig.publishableKey);
 const supa = configured && window.supabase ? window.supabase.createClient(supaConfig.url, supaConfig.publishableKey) : null;
 const roleNames = ["Bar", "Runner", "Debras", "Opbouw", "Afbouw", "Productie", "Garderobe", "Hospitality", "Oempa Loempa", "Routing", "Entertainment support", "Anders"];
 const documentTypes = ["Draaiboek", "Factsheet", "Plattegrond", "Briefing", "Overig"];
-const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: location.pathname === "/auth/reset-password" ? "reset-loading" : location.pathname === "/auth/confirmed" ? "confirmed-loading" : "login", recoveryReady: false, filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, marketplaceOfferOpen: false, roomChannel: null, roomChannelId: null, taskRefreshing: false, taskRefreshId: null, taskRefreshPromise: null, managerAction: "", managerEvent: "", managerShift: "", notificationPreferences: null, notificationError: "", notifications: [], notificationsError: "", notificationChannel: null, dataChannel: null, dataRefreshTimer: null, refreshing: false, extensionsReady: false, uploadBusy: false, uploadFile: null, uploadForm: null, pushEnabled: false };
+const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: location.pathname === "/auth/reset-password" ? "reset-loading" : location.pathname === "/auth/confirmed" ? "confirmed-loading" : "login", recoveryReady: false, filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, marketplaceOfferOpen: false, roomChannel: null, roomChannelId: null, taskRefreshing: false, taskRefreshId: null, taskRefreshPromise: null, managerAction: "", managerEvent: "", managerShift: "", notificationPreferences: null, notificationError: "", notifications: [], notificationsError: "", notificationRequest: 0, notificationChannel: null, dataChannel: null, dataRefreshTimer: null, refreshing: false, extensionsReady: false, uploadBusy: false, uploadFile: null, uploadForm: null, pushEnabled: false };
 const notificationChoices = [
   ["new_tasks", "Nieuwe taken"], ["new_shifts", "Nieuwe shifts"],
   ["shift_accepted", "Shift geaccepteerd"], ["shift_changed", "Shift gewijzigd"],
@@ -17,6 +17,23 @@ const notificationChoices = [
 const defaultNotificationPreferences = Object.fromEntries(notificationChoices.map(([key]) => [key, true]));
 function supportsPush() { return Boolean(supa && window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && window.LIEF_VAPID_PUBLIC_KEY); }
 function vapidBytes() { const value = window.LIEF_VAPID_PUBLIC_KEY.replace(/-/g, "+").replace(/_/g, "/"); return Uint8Array.from(atob(value.padEnd(Math.ceil(value.length / 4) * 4, "=")), c => c.charCodeAt(0)); }
+function pushDeviceId() {
+  const key = "lief-push-device-id";
+  try {
+    let id = localStorage.getItem(key);
+    if (!id) { id = crypto.randomUUID(); localStorage.setItem(key, id); }
+    return id;
+  } catch { return crypto.randomUUID(); }
+}
+function pushOptedIn(value) {
+  try {
+    if (value !== undefined) localStorage.setItem("lief-push-opt-in", value ? "yes" : "no");
+    return localStorage.getItem("lief-push-opt-in") === "yes";
+  } catch { return false; }
+}
+function registerPushSubscription(subscription) {
+  return pushAction("subscribe", { subscription: subscription.toJSON(), device_id: pushDeviceId() });
+}
 async function pushRegistration() {
   await navigator.serviceWorker.register("/sw.js");
   return Promise.race([
@@ -38,9 +55,13 @@ async function loadNotificationSettings() {
   else state.notificationPreferences = result.data || { user_id: state.user.id, ...defaultNotificationPreferences };
   if (supportsPush() && Notification.permission === "granted") {
     try {
-      const subscription = await (await pushRegistration()).pushManager.getSubscription();
+      const registration = await pushRegistration();
+      let subscription = await registration.pushManager.getSubscription();
+      if (!subscription && pushOptedIn()) {
+        subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidBytes() });
+      }
+      if (subscription) { await registerPushSubscription(subscription); pushOptedIn(true); }
       state.pushEnabled = Boolean(subscription);
-      if (subscription) await pushAction("subscribe", { subscription: subscription.toJSON() });
     } catch (error) {
       console.error(error);
       state.pushEnabled = false;
@@ -51,22 +72,47 @@ async function loadNotificationSettings() {
 
 async function loadNotifications() {
   if (!supa || !state.user) return;
-  const result = await supa.from("notifications").select("id,category,title,body,target_url,created_at,read_at").eq("user_id", state.user.id).order("created_at", { ascending: false });
+  const userId = state.user.id;
+  const request = ++state.notificationRequest;
+  const result = await supa.from("notifications").select("id,category,title,body,target_url,created_at,read_at").eq("user_id", userId).order("created_at", { ascending: false });
+  if (state.user?.id !== userId || request !== state.notificationRequest) return;
   if (result.error) {
     state.notificationsError = "Meldingen kunnen nog niet worden geladen. Controleer notifications.sql in Supabase.";
-    state.notifications = [];
+    refreshNotificationIndicator();
     return;
   }
   state.notificationsError = "";
   state.notifications = result.data || [];
-  if (currentRoute().page === "notifications") render();
+  refreshNotificationIndicator();
+}
+function refreshNotificationIndicator() {
+  const count = state.notifications.filter(item => !item.read_at).length;
+  const bell = document.querySelector(".crew-notification-bell");
+  if (bell) {
+    bell.setAttribute("aria-label", `Meldingen, ${count} ongelezen`);
+    const badge = bell.querySelector(".crew-notification-count");
+    if (badge) { badge.textContent = count > 99 ? "99+" : String(count); badge.hidden = !count; }
+  }
+  if (currentRoute().page === "notifications" && state.profile) render();
 }
 function startNotificationChannel() {
   if (!supa || !state.user || state.notificationChannel) return;
   state.notificationChannel = supa.channel(`crew-notifications-${state.user.id}`)
-    .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${state.user.id}` }, () => loadNotifications().then(render).catch(console.error))
-    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "notifications", filter: `user_id=eq.${state.user.id}` }, () => loadNotifications().then(render).catch(console.error))
-    .subscribe();
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${state.user.id}` }, () => loadNotifications().catch(console.error))
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "notifications", filter: `user_id=eq.${state.user.id}` }, () => loadNotifications().catch(console.error))
+    .subscribe(status => {
+      if (status === "SUBSCRIBED") loadNotifications().catch(console.error);
+      if (["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status) && state.user) {
+        const failed = state.notificationChannel;
+        setTimeout(() => {
+          if (!state.user || state.notificationChannel !== failed) return;
+          supa.removeChannel(failed);
+          state.notificationChannel = null;
+          startNotificationChannel();
+          loadNotifications().catch(console.error);
+        }, 3000);
+      }
+    });
 }
 function startDataChannel() {
   if (!supa || !state.user || state.dataChannel) return;
@@ -115,6 +161,7 @@ function icon(name, size = 20) {
     file: '<path d="M5 3h9l5 5v13H5z"/><path d="M14 3v6h5M8 14h8M8 18h6"/>',
     alert: '<path d="M12 3 2 21h20L12 3Z"/><path d="M12 9v5m0 3h.01"/>',
     refresh: '<path d="M20 11a8 8 0 1 0-2.3 6.1M20 4v7h-7"/>',
+    bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/>',
   };
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p[name] || p.ticket}</svg>`;
 }
@@ -386,7 +433,8 @@ function nav(active, mobile = false) {
 }
 function shell(content, active = "home") {
   const demo = !configured ? `<span class="crew-demo-label">DEMO · voorbeeldgegevens</span>` : "";
-  return `<div class="crew-shell"><header class="crew-header"><a href="#home" class="crew-brand" aria-label="LIEF Amsterdam, naar home">${logo()}<span class="crew-brand-copy"><strong>CREW APP</strong><small>LIEF AMSTERDAM</small></span></a>${nav(active)}<div class="crew-header-end">${demo}<span class="crew-avatar" aria-label="${e(state.profile?.full_name)}">${e(firstName().slice(0, 1).toUpperCase())}</span></div></header><main class="crew-main" id="main-content">${content}</main>${nav(active, true)}${state.toast ? `<div class="toast" role="status">${e(state.toast)}</div>` : ""}</div>`;
+  const unread = state.notifications.filter(item => !item.read_at).length;
+  return `<div class="crew-shell"><header class="crew-header"><a href="#home" class="crew-brand" aria-label="LIEF Amsterdam, naar home">${logo()}<span class="crew-brand-copy"><strong>CREW APP</strong><small>LIEF AMSTERDAM</small></span></a>${nav(active)}<div class="crew-header-end">${demo}<a class="crew-notification-bell ${active === "notifications" ? "active" : ""}" href="#notifications" aria-label="Meldingen, ${unread} ongelezen">${icon("bell", 22)}<span class="crew-notification-count" ${unread ? "" : "hidden"}>${unread > 99 ? "99+" : unread}</span></a><span class="crew-avatar" aria-label="${e(state.profile?.full_name)}">${e(firstName().slice(0, 1).toUpperCase())}</span></div></header><main class="crew-main" id="main-content">${content}</main>${nav(active, true)}${state.toast ? `<div class="toast" role="status">${e(state.toast)}</div>` : ""}</div>`;
 }
 function heading(eyebrow, title, description = "") { return `<div class="crew-heading"><span class="eyebrow">${e(eyebrow)}</span><h1>${e(title)}</h1>${description ? `<p>${e(description)}</p>` : ""}</div>`; }
 function empty(title, description, action = "", label = "") { return `<div class="crew-empty"><span class="crew-empty-icon">✦</span><h2>${e(title)}</h2><p>${e(description)}</p>${action ? button(label, "go", action) : ""}</div>`; }
@@ -484,7 +532,7 @@ function roomsPage() {
 function profilePage() {
   const status = state.pushEnabled && window.Notification?.permission === "granted" ? "Meldingen staan aan" : "Meldingen staan uit";
   const pushSupport = supportsPush();
-  const settings = configured ? `<section class="crew-white-panel crew-notifications"><div class="crew-section-head"><h2>Meldingen</h2>${badge(status, state.pushEnabled ? "confirmed" : "soft")}</div><p>Ontvang bericht over je shifts, taken en belangrijke eventinformatie.</p>${state.notificationError ? `<p class="crew-alert">${e(state.notificationError)}</p>` : ""}${pushSupport ? `${state.pushEnabled ? button("Meldingen uitschakelen", "disable-push", "", "secondary") : button("Meldingen inschakelen", "enable-push")}${state.pushEnabled ? button("Stuur testmelding", "test-push", "", "secondary") : ""}` : `<p class="crew-form-hint">Pushmeldingen worden op deze browser of dit apparaat niet ondersteund. Op iPhone werkt dit na toevoegen aan het beginscherm.</p>`}<div class="crew-notification-options">${notificationChoices.map(([key, label]) => `<label class="crew-notification-option"><span>${e(label)}</span><input type="checkbox" data-action="notification-preference" data-id="${key}" ${state.notificationPreferences?.[key] !== false ? "checked" : ""} ${!state.notificationPreferences ? "disabled" : ""} aria-label="${e(label)}" /></label>`).join("")}</div></section>` : `<section class="crew-white-panel crew-notifications"><h2>Meldingen</h2><p>Meldingen zijn beschikbaar zodra Supabase is aangesloten.</p></section>`;
+  const settings = configured ? `<section class="crew-white-panel crew-notifications"><div class="crew-section-head"><h2>Meldingen</h2>${badge(status, state.pushEnabled ? "confirmed" : "soft")}</div><p>Ontvang bericht over je shifts, taken en belangrijke eventinformatie. De keuzes hieronder regelen push; meldingen in de app blijven zichtbaar.</p>${state.notificationError ? `<p class="crew-alert">${e(state.notificationError)}</p>` : ""}${pushSupport ? `${state.pushEnabled ? button("Meldingen uitschakelen", "disable-push", "", "secondary") : button("Meldingen inschakelen", "enable-push")}${state.pushEnabled ? button("Stuur testmelding", "test-push", "", "secondary") : ""}` : `<p class="crew-form-hint">Pushmeldingen worden op deze browser of dit apparaat niet ondersteund. Op iPhone werkt dit na toevoegen aan het beginscherm.</p>`}<div class="crew-notification-options">${notificationChoices.map(([key, label]) => `<label class="crew-notification-option"><span>${e(label)}</span><input type="checkbox" data-action="notification-preference" data-id="${key}" ${state.notificationPreferences?.[key] !== false ? "checked" : ""} ${!state.notificationPreferences ? "disabled" : ""} aria-label="${e(label)}" /></label>`).join("")}</div></section>` : `<section class="crew-white-panel crew-notifications"><h2>Meldingen</h2><p>Meldingen zijn beschikbaar zodra Supabase is aangesloten.</p></section>`;
   return shell(`${heading("JOUW GEGEVENS", "Profiel")}<div class="crew-profile-card"><div class="crew-profile-avatar">${e(firstName().slice(0, 1).toUpperCase())}</div><div><h2>${e(state.profile.full_name)}</h2>${badge(isManager() ? "Manager" : "Medewerker", isManager() ? "lime" : "soft")}</div></div><div class="crew-white-panel crew-profile-details"><div class="crew-facts"><div><span>E-mailadres</span><strong>${e(state.user.email || "Demo-account")}</strong></div></div>${configured ? `<form class="crew-form" data-form="profile"><label>Volledige naam<input name="full_name" maxlength="100" value="${e(state.profile.full_name)}" required /></label><button class="crew-button primary" type="submit"><span>Naam opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form>` : ""}${button(configured ? "Uitloggen" : "Terug naar demo-keuze", "logout", "", "secondary")}</div>${settings}`, "profile");
 }
 
@@ -789,6 +837,8 @@ root.addEventListener("click", event => {
     if (!notice) return;
     await markNotificationRead(id);
     goPath(safeNotificationTarget(notice.target_url));
+    const route = currentRoute();
+    if (route.page === "room" && route.id) await refreshTasks(route.id);
   });
   if (action === "demo-employee" || action === "demo-manager") {
     state.data = makeDemoData();
@@ -815,10 +865,9 @@ root.addEventListener("click", event => {
     if (permission !== "granted") { toast("Meldingen staan uit. Je kunt toestemming geven via je browserinstellingen."); return; }
     const registration = await pushRegistration();
     let subscription = await registration.pushManager.getSubscription();
-    const created = !subscription;
     if (!subscription) subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidBytes() });
-    try { await pushAction("subscribe", { subscription: subscription.toJSON() }); }
-    catch (error) { if (created) await subscription.unsubscribe(); throw error; }
+    pushOptedIn(true);
+    await registerPushSubscription(subscription);
     state.pushEnabled = true;
     toast("Meldingen staan aan.");
   });
@@ -828,6 +877,7 @@ root.addEventListener("click", event => {
       await pushAction("unsubscribe", { endpoint: subscription.endpoint });
       await subscription.unsubscribe();
     }
+    pushOptedIn(false);
     state.pushEnabled = false;
     toast("Meldingen staan uit.");
   });
@@ -908,6 +958,7 @@ root.addEventListener("click", event => {
     toast("Document verwijderd.");
   });
   if (action === "logout") run(async () => {
+    pushOptedIn(false);
     if (supportsPush() && Notification.permission === "granted") {
       const subscription = await (await pushRegistration()).pushManager.getSubscription();
       if (subscription) {
@@ -1198,6 +1249,7 @@ root.addEventListener("submit", event => {
 if (supa) supa.auth.onAuthStateChange((event) => {
   if (event === "PASSWORD_RECOVERY") { state.recoveryReady = true; state.authMode = "reset"; setTimeout(() => bootstrap().catch(console.error), 0); }
   if (event === "SIGNED_OUT") {
+    pushOptedIn(false);
     if (supportsPush()) pushRegistration().then(registration => registration.pushManager.getSubscription()).then(subscription => subscription?.unsubscribe()).catch(console.error);
     if (state.roomChannel) supa.removeChannel(state.roomChannel);
     if (state.notificationChannel) supa.removeChannel(state.notificationChannel);
@@ -1214,16 +1266,33 @@ if (supa) supa.auth.onAuthStateChange((event) => {
 window.addEventListener("hashchange", render);
 window.addEventListener("popstate", render);
 navigator.serviceWorker?.addEventListener("message", event => {
+  if (event.data?.type === "LIEF_PUSH_REFRESH") {
+    if (state.user) loadNotificationSettings().catch(console.error);
+    return;
+  }
   if (event.data?.type !== "LIEF_NAVIGATE" || typeof event.data.url !== "string") return;
-  goPath(safeNotificationTarget(event.data.url));
-  event.ports?.[0]?.postMessage({ ok: true });
+  try {
+    goPath(safeNotificationTarget(event.data.url));
+    event.ports?.[0]?.postMessage({ ok: true });
+    const route = currentRoute();
+    if (route.page === "room" && route.id) refreshTasks(route.id).catch(console.error);
+    else refreshCurrent().catch(console.error);
+  } catch (error) {
+    console.error(error);
+    event.ports?.[0]?.postMessage({ ok: false });
+  }
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible" || !state.user) return;
   refreshCurrent().catch(console.error);
+  loadNotificationSettings().catch(console.error);
   const route = currentRoute();
   if (route.page === "room" && route.id) refreshTasks(route.id).catch(console.error);
 });
+window.addEventListener("focus", () => { if (state.user) loadNotifications().catch(console.error); });
+setInterval(() => {
+  if (state.user && document.visibilityState === "visible") loadNotifications().catch(console.error);
+}, 30000);
 setInterval(() => {
   if (!state.user || document.visibilityState !== "visible") return;
   if (!["shifts", "hours", "completed", "completed-shifts", "manager"].includes(currentRoute().page)) return;

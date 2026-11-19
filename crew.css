@@ -11,6 +11,10 @@ a:focus-visible, textarea:focus-visible { outline: 3px solid #6b41bc; outline-of
 .crew-brand-copy strong { font-size: 10px; font-weight: 900; letter-spacing: .08em; }
 .crew-brand-copy small { font-size: 8px; font-weight: 800; letter-spacing: .09em; }
 .crew-header-end { display: flex; align-items: center; gap: 12px; }
+.crew-notification-bell { position: relative; display: grid; place-items: center; width: 46px; height: 46px; flex: none; border: 2px solid var(--ink); border-radius: 50%; color: var(--ink); background: white; text-decoration: none; }
+.crew-notification-bell:hover, .crew-notification-bell.active { background: var(--lime); }
+.crew-notification-count { position: absolute; top: -7px; right: -8px; display: grid; place-items: center; min-width: 22px; height: 22px; padding: 0 4px; border: 2px solid var(--lilac); border-radius: 999px; color: white; background: var(--ink); font-size: 10px; font-weight: 850; line-height: 1; }
+.crew-notification-count[hidden] { display: none; }
 .crew-avatar { display: grid; place-items: center; width: 38px; height: 38px; flex: none; border: 2px solid var(--ink); border-radius: 50%; color: var(--ink); background: var(--lime); font: 800 15px var(--sans); }
 .crew-demo-label { display: none; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
 .crew-desktop-nav { display: none; }

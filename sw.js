@@ -1,5 +1,8 @@
 "use strict";
 
+self.addEventListener("install", event => event.waitUntil(self.skipWaiting()));
+self.addEventListener("activate", event => event.waitUntil(self.clients.claim()));
+
 self.addEventListener("push", event => {
   let message = {};
   try { message = event.data?.json() || {}; } catch { message = { body: event.data?.text() || "" }; }
@@ -11,7 +14,14 @@ self.addEventListener("push", event => {
     icon: "./public/icons/icon-192.png",
     badge: "./public/icons/icon-192.png",
     tag: typeof message.tag === "string" ? message.tag : undefined,
+    renotify: false,
     data: { url },
+  }));
+});
+
+self.addEventListener("pushsubscriptionchange", event => {
+  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clients => {
+    clients.forEach(client => client.postMessage({ type: "LIEF_PUSH_REFRESH" }));
   }));
 });
 
@@ -37,14 +47,13 @@ self.addEventListener("notificationclick", event => {
         const acknowledged = await new Promise(resolve => {
           const channel = new MessageChannel();
           const timer = setTimeout(() => resolve(false), 1200);
-          channel.port1.onmessage = () => { clearTimeout(timer); resolve(true); };
+          channel.port1.onmessage = message => { clearTimeout(timer); resolve(message.data?.ok === true); };
           existing.postMessage({ type: "LIEF_NAVIGATE", url: target.pathname + target.search + target.hash }, [channel.port2]);
         });
         if (acknowledged) return;
       } catch { /* Een slapende PWA kan het bericht missen. */ }
       try { const navigated = await existing.navigate(target.href); if (navigated) return navigated.focus(); }
-      catch { /* Het bestaande venster blijft behouden. */ }
-      try { return await existing.focus(); } catch { return; }
+      catch { /* Open een nieuw venster met de juiste bestemming. */ }
     }
     return self.clients.openWindow(target.href);
   })());
