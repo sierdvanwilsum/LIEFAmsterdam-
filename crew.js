@@ -8,13 +8,14 @@ const configured = Boolean(supaConfig.url && supaConfig.publishableKey);
 const supa = configured && window.supabase ? window.supabase.createClient(supaConfig.url, supaConfig.publishableKey) : null;
 const roleNames = ["Bar", "Runner", "Debras", "Opbouw", "Afbouw", "Productie", "Garderobe", "Hospitality", "Oempa Loempa", "Routing", "Entertainment support", "Anders"];
 const documentTypes = ["Draaiboek", "Factsheet", "Plattegrond", "Briefing", "Overig"];
-const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: location.pathname === "/auth/reset-password" ? "reset-loading" : location.pathname === "/auth/confirmed" ? "confirmed-loading" : "login", recoveryReady: false, filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, marketplaceOfferOpen: false, roomChannel: null, roomChannelId: null, taskRefreshing: false, taskRefreshId: null, taskRefreshPromise: null, managerAction: "", managerEvent: "", managerShift: "", notificationPreferences: null, notificationError: "", notifications: [], notificationsError: "", notificationRequest: 0, notificationChannel: null, dataChannel: null, dataRefreshTimer: null, refreshing: false, extensionsReady: false, uploadBusy: false, uploadFile: null, uploadForm: null, pushEnabled: false };
+const state = { user: null, profile: null, data: null, busy: false, toast: "", authMode: location.pathname === "/auth/reset-password" ? "reset-loading" : location.pathname === "/auth/confirmed" ? "confirmed-loading" : "login", recoveryReady: false, filter: "alles", draftShift: null, firstRole: "", secondRole: "", available: true, editTask: null, marketplaceOfferOpen: false, roomChannel: null, roomChannelId: null, taskRefreshing: false, taskRefreshId: null, taskRefreshPromise: null, managerAction: "", managerEvent: "", managerShift: "", notificationPreferences: null, notificationError: "", notifications: [], notificationsError: "", notificationRequest: 0, pushRequest: 0, notificationChannel: null, dataChannel: null, dataRefreshTimer: null, refreshing: false, extensionsReady: false, uploadBusy: false, uploadFile: null, uploadForm: null, pushEnabled: false, pushReady: false };
 const notificationChoices = [
   ["new_tasks", "Nieuwe taken"], ["new_shifts", "Nieuwe shifts"],
   ["shift_accepted", "Shift geaccepteerd"], ["shift_changed", "Shift gewijzigd"],
   ["event_announcements", "Belangrijke eventmededelingen"], ["document_changed", "Document gewijzigd"],
 ];
 const defaultNotificationPreferences = Object.fromEntries(notificationChoices.map(([key]) => [key, true]));
+let authEpoch = 0;
 function supportsPush() { return Boolean(supa && window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && window.LIEF_VAPID_PUBLIC_KEY); }
 function vapidBytes() { const value = window.LIEF_VAPID_PUBLIC_KEY.replace(/-/g, "+").replace(/_/g, "/"); return Uint8Array.from(atob(value.padEnd(Math.ceil(value.length / 4) * 4, "=")), c => c.charCodeAt(0)); }
 function pushDeviceId() {
@@ -25,14 +26,31 @@ function pushDeviceId() {
     return id;
   } catch { return crypto.randomUUID(); }
 }
-function pushOptedIn(value) {
+function pushChoice() {
+  if (!state.user?.id) return null;
   try {
-    if (value !== undefined) localStorage.setItem("lief-push-opt-in", value ? "yes" : "no");
-    return localStorage.getItem("lief-push-opt-in") === "yes";
-  } catch { return false; }
+    const key = `lief-push-opt-in:${state.user.id}`;
+    let choice = localStorage.getItem(key);
+    if (choice === null) {
+      choice = localStorage.getItem("lief-push-opt-in");
+      if (choice !== null) { localStorage.setItem(key, choice); localStorage.removeItem?.("lief-push-opt-in"); }
+    }
+    return choice;
+  } catch { return null; }
+}
+function pushOptedIn(value) {
+  if (value !== undefined && state.user?.id) {
+    try { localStorage.setItem(`lief-push-opt-in:${state.user.id}`, value ? "yes" : "no"); }
+    catch { /* Browseropslag kan tijdelijk ontbreken. */ }
+  }
+  return pushChoice() === "yes";
 }
 function registerPushSubscription(subscription) {
-  return pushAction("subscribe", { subscription: subscription.toJSON(), device_id: pushDeviceId() });
+  const userId = state.user?.id;
+  return pushAction("subscribe", { subscription: subscription.toJSON(), device_id: pushDeviceId() }).then(result => {
+    try { if (userId && state.user?.id === userId) localStorage.setItem("lief-push-subscription-owner", userId); } catch { /* Browseropslag kan ontbreken. */ }
+    return result;
+  });
 }
 async function pushRegistration() {
   await navigator.serviceWorker.register("/sw.js");
@@ -50,24 +68,49 @@ async function loadNotificationSettings() {
   state.notificationError = "";
   state.notificationPreferences = null;
   if (!supa || !state.user) return;
-  const result = await supa.from("notification_preferences").select("*").eq("user_id", state.user.id).maybeSingle();
+  const userId = state.user.id;
+  const request = ++state.pushRequest;
+  const result = await supa.from("notification_preferences").select("*").eq("user_id", userId).maybeSingle();
+  if (state.user?.id !== userId || request !== state.pushRequest) return;
   if (result.error) state.notificationError = "Meldingen zijn nog niet ingericht. Voer notifications.sql uit in Supabase.";
   else state.notificationPreferences = result.data || { user_id: state.user.id, ...defaultNotificationPreferences };
   if (supportsPush() && Notification.permission === "granted") {
+    let subscription = null;
     try {
       const registration = await pushRegistration();
-      let subscription = await registration.pushManager.getSubscription();
+      subscription = await registration.pushManager.getSubscription();
+      if (state.user?.id !== userId || request !== state.pushRequest) return;
+      let owner = null;
+      try { owner = localStorage.getItem("lief-push-subscription-owner"); } catch { /* Browseropslag kan ontbreken. */ }
+      if (subscription && owner && owner !== userId) {
+        await subscription.unsubscribe();
+        subscription = null;
+      }
+      if (subscription && pushChoice() === null) pushOptedIn(true);
       if (!subscription && pushOptedIn()) {
         subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidBytes() });
       }
-      if (subscription) { await registerPushSubscription(subscription); pushOptedIn(true); }
-      state.pushEnabled = Boolean(subscription);
+      if (state.user?.id !== userId || request !== state.pushRequest) return;
+      state.pushEnabled = pushOptedIn();
+      if (subscription && state.pushEnabled) {
+        await registerPushSubscription(subscription);
+        if (state.user?.id !== userId || request !== state.pushRequest) return;
+        state.pushReady = true;
+      } else {
+        state.pushReady = false;
+        if (subscription) {
+          try { await pushAction("unsubscribe", { endpoint: subscription.endpoint }); } catch (error) { console.error(error); }
+          await subscription.unsubscribe();
+        }
+      }
     } catch (error) {
+      if (state.user?.id !== userId || request !== state.pushRequest) return;
       console.error(error);
-      state.pushEnabled = false;
-      state.notificationError ||= "Pushmeldingen zijn nog niet beschikbaar. Controleer de Edge Function.";
+      state.pushEnabled = pushOptedIn();
+      state.pushReady = false;
+      state.notificationError ||= "De pushverbinding wordt opnieuw geprobeerd wanneer je de app opent.";
     }
-  } else state.pushEnabled = false;
+  } else { state.pushEnabled = false; state.pushReady = false; }
 }
 
 async function loadNotifications() {
@@ -530,9 +573,9 @@ function roomsPage() {
 }
 
 function profilePage() {
-  const status = state.pushEnabled && window.Notification?.permission === "granted" ? "Meldingen staan aan" : "Meldingen staan uit";
+  const status = state.pushEnabled && window.Notification?.permission === "granted" ? state.pushReady ? "Meldingen staan aan" : "Meldingen worden hersteld" : "Meldingen staan uit";
   const pushSupport = supportsPush();
-  const settings = configured ? `<section class="crew-white-panel crew-notifications"><div class="crew-section-head"><h2>Meldingen</h2>${badge(status, state.pushEnabled ? "confirmed" : "soft")}</div><p>Ontvang bericht over je shifts, taken en belangrijke eventinformatie. De keuzes hieronder regelen push; meldingen in de app blijven zichtbaar.</p>${state.notificationError ? `<p class="crew-alert">${e(state.notificationError)}</p>` : ""}${pushSupport ? `${state.pushEnabled ? button("Meldingen uitschakelen", "disable-push", "", "secondary") : button("Meldingen inschakelen", "enable-push")}${state.pushEnabled ? button("Stuur testmelding", "test-push", "", "secondary") : ""}` : `<p class="crew-form-hint">Pushmeldingen worden op deze browser of dit apparaat niet ondersteund. Op iPhone werkt dit na toevoegen aan het beginscherm.</p>`}<div class="crew-notification-options">${notificationChoices.map(([key, label]) => `<label class="crew-notification-option"><span>${e(label)}</span><input type="checkbox" data-action="notification-preference" data-id="${key}" ${state.notificationPreferences?.[key] !== false ? "checked" : ""} ${!state.notificationPreferences ? "disabled" : ""} aria-label="${e(label)}" /></label>`).join("")}</div></section>` : `<section class="crew-white-panel crew-notifications"><h2>Meldingen</h2><p>Meldingen zijn beschikbaar zodra Supabase is aangesloten.</p></section>`;
+  const settings = configured ? `<section class="crew-white-panel crew-notifications"><div class="crew-section-head"><h2>Meldingen</h2>${badge(status, state.pushReady ? "confirmed" : "soft")}</div><p>Ontvang bericht over je shifts, taken en belangrijke eventinformatie. De keuzes hieronder regelen push; meldingen in de app blijven zichtbaar.</p>${state.notificationError ? `<p class="crew-alert">${e(state.notificationError)}</p>` : ""}${pushSupport ? `${state.pushEnabled ? button("Meldingen uitschakelen", "disable-push", "", "secondary") : button("Meldingen inschakelen", "enable-push")}${state.pushReady ? button("Stuur testmelding", "test-push", "", "secondary") : ""}` : `<p class="crew-form-hint">Pushmeldingen worden op deze browser of dit apparaat niet ondersteund. Op iPhone werkt dit na toevoegen aan het beginscherm.</p>`}<div class="crew-notification-options">${notificationChoices.map(([key, label]) => `<label class="crew-notification-option"><span>${e(label)}</span><input type="checkbox" data-action="notification-preference" data-id="${key}" ${state.notificationPreferences?.[key] !== false ? "checked" : ""} ${!state.notificationPreferences ? "disabled" : ""} aria-label="${e(label)}" /></label>`).join("")}</div></section>` : `<section class="crew-white-panel crew-notifications"><h2>Meldingen</h2><p>Meldingen zijn beschikbaar zodra Supabase is aangesloten.</p></section>`;
   return shell(`${heading("JOUW GEGEVENS", "Profiel")}<div class="crew-profile-card"><div class="crew-profile-avatar">${e(firstName().slice(0, 1).toUpperCase())}</div><div><h2>${e(state.profile.full_name)}</h2>${badge(isManager() ? "Manager" : "Medewerker", isManager() ? "lime" : "soft")}</div></div><div class="crew-white-panel crew-profile-details"><div class="crew-facts"><div><span>E-mailadres</span><strong>${e(state.user.email || "Demo-account")}</strong></div></div>${configured ? `<form class="crew-form" data-form="profile"><label>Volledige naam<input name="full_name" maxlength="100" value="${e(state.profile.full_name)}" required /></label><button class="crew-button primary" type="submit"><span>Naam opslaan</span><span class="crew-button-icon">${icon("check", 17)}</span></button></form>` : ""}${button(configured ? "Uitloggen" : "Terug naar demo-keuze", "logout", "", "secondary")}</div>${settings}`, "profile");
 }
 
@@ -859,26 +902,32 @@ root.addEventListener("click", event => {
     toast("Shift gepubliceerd. Medewerkers met Nieuwe shifts ingeschakeld krijgen een melding.");
   });
   if (action === "enable-push") run(async () => {
+    state.pushRequest++;
     if (!supportsPush()) throw new Error("Meldingen worden op dit apparaat niet ondersteund.");
     if (!state.notificationPreferences) throw new Error("Voer eerst notifications.sql uit in Supabase.");
     const permission = await Notification.requestPermission();
     if (permission !== "granted") { toast("Meldingen staan uit. Je kunt toestemming geven via je browserinstellingen."); return; }
+    pushOptedIn(true);
+    state.pushEnabled = true;
+    state.pushReady = false;
     const registration = await pushRegistration();
     let subscription = await registration.pushManager.getSubscription();
     if (!subscription) subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidBytes() });
-    pushOptedIn(true);
     await registerPushSubscription(subscription);
-    state.pushEnabled = true;
+    state.pushReady = true;
     toast("Meldingen staan aan.");
   });
   if (action === "disable-push") run(async () => {
-    const subscription = await (await pushRegistration()).pushManager.getSubscription();
-    if (subscription) {
-      await pushAction("unsubscribe", { endpoint: subscription.endpoint });
-      await subscription.unsubscribe();
-    }
+    state.pushRequest++;
     pushOptedIn(false);
     state.pushEnabled = false;
+    state.pushReady = false;
+    const subscription = await (await pushRegistration()).pushManager.getSubscription();
+    if (subscription) {
+      try { await pushAction("unsubscribe", { endpoint: subscription.endpoint }); }
+      catch (error) { console.error(error); }
+      await subscription.unsubscribe();
+    }
     toast("Meldingen staan uit.");
   });
   if (action === "test-push") run(async () => {
@@ -958,7 +1007,7 @@ root.addEventListener("click", event => {
     toast("Document verwijderd.");
   });
   if (action === "logout") run(async () => {
-    pushOptedIn(false);
+    state.pushRequest++;
     if (supportsPush() && Notification.permission === "granted") {
       const subscription = await (await pushRegistration()).pushManager.getSubscription();
       if (subscription) {
@@ -971,7 +1020,7 @@ root.addEventListener("click", event => {
     if (state.notificationChannel && supa) supa.removeChannel(state.notificationChannel);
     if (state.dataChannel && supa) supa.removeChannel(state.dataChannel);
     clearTimeout(state.dataRefreshTimer);
-    state.roomChannel = null; state.roomChannelId = null; state.user = null; state.profile = null; state.data = null; state.notificationPreferences = null; state.pushEnabled = false; state.authMode = "login";
+    state.roomChannel = null; state.roomChannelId = null; state.user = null; state.profile = null; state.data = null; state.notificationPreferences = null; state.pushEnabled = false; state.pushReady = false; state.authMode = "login";
     state.notificationChannel = null; state.dataChannel = null; state.notifications = [];
     history.replaceState(null, "", "/"); render();
   });
@@ -1249,17 +1298,20 @@ root.addEventListener("submit", event => {
 if (supa) supa.auth.onAuthStateChange((event) => {
   if (event === "PASSWORD_RECOVERY") { state.recoveryReady = true; state.authMode = "reset"; setTimeout(() => bootstrap().catch(console.error), 0); }
   if (event === "SIGNED_OUT") {
-    pushOptedIn(false);
-    if (supportsPush()) pushRegistration().then(registration => registration.pushManager.getSubscription()).then(subscription => subscription?.unsubscribe()).catch(console.error);
+    const epoch = ++authEpoch;
+    state.pushRequest++;
+    if (supportsPush()) pushRegistration().then(registration => registration.pushManager.getSubscription())
+      .then(subscription => authEpoch === epoch && !state.user ? subscription?.unsubscribe() : undefined).catch(console.error);
     if (state.roomChannel) supa.removeChannel(state.roomChannel);
     if (state.notificationChannel) supa.removeChannel(state.notificationChannel);
     if (state.dataChannel) supa.removeChannel(state.dataChannel);
     clearTimeout(state.dataRefreshTimer);
     state.roomChannel = null; state.roomChannelId = null; state.notificationChannel = null; state.dataChannel = null;
-    state.user = null; state.profile = null; state.data = null; state.notifications = []; state.notificationPreferences = null; state.pushEnabled = false;
+    state.user = null; state.profile = null; state.data = null; state.notifications = []; state.notificationPreferences = null; state.pushEnabled = false; state.pushReady = false;
     if (state.authMode !== "reset") setTimeout(render, 0);
   }
   if (event === "SIGNED_IN" && !state.user && state.authMode !== "reset" && state.authMode !== "reset-success") {
+    authEpoch++;
     setTimeout(() => bootstrap().catch(console.error), 0);
   }
 });
@@ -1289,10 +1341,18 @@ document.addEventListener("visibilitychange", () => {
   const route = currentRoute();
   if (route.page === "room" && route.id) refreshTasks(route.id).catch(console.error);
 });
-window.addEventListener("focus", () => { if (state.user) loadNotifications().catch(console.error); });
+window.addEventListener("focus", () => {
+  if (!state.user) return;
+  loadNotifications().catch(console.error);
+  if (pushOptedIn() && !state.pushReady) loadNotificationSettings().catch(console.error);
+});
 setInterval(() => {
   if (state.user && document.visibilityState === "visible") loadNotifications().catch(console.error);
 }, 30000);
+setInterval(() => {
+  if (state.user && document.visibilityState === "visible" && pushOptedIn() && !state.pushReady)
+    loadNotificationSettings().catch(console.error);
+}, 120000);
 setInterval(() => {
   if (!state.user || document.visibilityState !== "visible") return;
   if (!["shifts", "hours", "completed", "completed-shifts", "manager"].includes(currentRoute().page)) return;

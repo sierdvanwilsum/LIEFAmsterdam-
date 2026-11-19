@@ -63,6 +63,7 @@ De code en SQL voor push zijn aanwezig, maar **live push werkt pas na deze Supab
 **Controleren:** klik als medewerker op **Stuur testmelding**. Een manager kan daarna een taak toewijzen, een medewerker bij een shift indelen en een nieuwe conceptshift met rollen publiceren. Elke actie maakt een rij in `notifications`; `delivery_state = sent` betekent dat de pushdienst de melding accepteerde. De inboxmelding blijft zichtbaar als push uit staat; de voorkeuren sturen alleen telefoonpush. Bij problemen: controleer de Edge Function logs, de webhook-logs en `cron.job_run_details` in Supabase. De databaseproef staat in [`notifications_reliability.sql`](supabase/tests/notifications_reliability.sql) en rolt testdata terug.
 
 De voorkeuren voor nieuwe taken, nieuwe shifts, geaccepteerde of gewijzigde shifts, eventmededelingen en documenten staan per gebruiker in Supabase. Een manager kan een urgente taak aan alle ingeschreven crewleden van één shift melden via het selectievakje in het taakformulier. Een gewijzigde belangrijke mededeling in de shiftbriefing meldt ook de ingeschreven crew. Nieuwe shifts starten als concept en sturen pas bij **Publiceer shift** een melding.
+De keuze **Meldingen inschakelen** blijft per account op het apparaat bewaard bij opnieuw openen of aanmelden. Als de pushdienst tijdelijk niet bereikbaar is, toont het profiel een herstelstatus en probeert de app opnieuw te verbinden; alleen **Meldingen uitschakelen** zet deze keuze uit.
 
 ## Productie-URL en e-maillinks
 
