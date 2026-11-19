@@ -242,6 +242,16 @@ function runAuthSubmit(form, pendingLabel, work) {
   });
 }
 
+async function loadAllRows(table, columns, client = supa) {
+  const rows = [];
+  while (true) {
+    const result = await client.from(table).select(columns, { count: "exact" }).order("id").range(rows.length, rows.length + 499);
+    if (result.error) throw result.error;
+    const page = result.data || [];
+    rows.push(...page);
+    if (!page.length || result.count != null && rows.length >= result.count || result.count == null && page.length < 500) return { data: rows, error: null };
+  }
+}
 async function loadData() {
   if (!supa) {
     const d = state.data;
@@ -250,7 +260,11 @@ async function loadData() {
     return;
   }
   const tables = ["profiles", "events", "shifts", "shift_roles", "shift_signups", "tasks", "documents"];
-  const queries = tables.map(table => supa.from(table).select(table === "profiles" ? "id,full_name,role,avatar_url" : "*"));
+  const queries = tables.map(table => {
+    const columns = table === "profiles" ? "id,full_name,role,avatar_url" : "*";
+    return isManager() && ["profiles", "events", "shifts", "shift_signups"].includes(table)
+      ? loadAllRows(table, columns) : supa.from(table).select(columns);
+  });
   const results = await Promise.all([...queries, supa.rpc("shift_occupancy"), supa.rpc("shift_role_occupancy")]);
   results.forEach(result => { if (result.error) throw result.error; });
   state.data = Object.fromEntries(tables.map((table, index) => [table, results[index].data || []]));
@@ -570,13 +584,16 @@ function managerQuickAction() {
   }
   return "";
 }
+function managerOverviewActions() {
+  return `<div class="crew-manager-overviews"><div class="crew-overview-link">${button("Afgeronde shifts", "go", "completed-shifts")}</div><div class="crew-overview-link">${button("Feedback & afgeronde events", "go", "completed", "secondary")}</div></div>`;
+}
 function managerPage() {
   const upcoming = state.data.events.filter(event => event.end_date >= todayIso()).sort((a, b) => a.start_date.localeCompare(b.start_date));
   const openShifts = upcomingShifts().filter(shift => shift.required_people === 0 || occupancyOf(shift.id) < shift.required_people).length;
   const openTasks = state.data.tasks.filter(task => task.status !== "klaar");
   const openPlaces = upcomingShifts().reduce((sum, shift) => sum + openOf(shift), 0);
   const stats = [[upcoming.length, "Aankomende events"], [openShifts, "Open shifts"], [openPlaces, "Open plekken"], [openTasks.length, "Open taken"], [openTasks.filter(t => t.priority === "urgent").length, "Urgente taken"]];
-  return shell(`<div class="crew-manager-title">${heading("MANAGER · LIEF AMSTERDAM", "Crew en events.", "De belangrijkste acties en bezetting direct in beeld.")}${refreshButton()}</div><div class="crew-overview-link">${button("Feedback & afgeronde events", "go", "completed")}</div><div class="crew-manager-actions">${[["staff", "Personeel inplannen"], ["event", "Nieuw event"], ["shift", "Shift toevoegen"], ["task", "Taak toevoegen"], ["document", "Document toevoegen"], ["announcement", "Nieuwe mededeling"]].map(([key, label]) => button(label, "manager-action", key, key === "staff" ? "primary" : "secondary")).join("")}</div>${managerQuickAction()}${managerSwaps()}<div class="crew-manager-stats">${stats.map(([value, label], index) => `<div class="${index === 4 ? "accent" : ""}"><strong>${value}</strong><span>${label}</span></div>`).join("")}</div><div class="crew-section-head" id="manager-events"><h2>Aankomende events</h2><button type="button" class="crew-small-button" data-action="new-event">${icon("plus", 16)} Nieuw event</button></div><div class="crew-manager-event-grid">${upcoming.length ? upcoming.map(eventCardManager).join("") : empty("Nog geen events", "Maak het eerste event aan om shifts te plannen.")}</div>${managerFeedback()}`, "manager");
+  return shell(`<div class="crew-manager-title">${heading("MANAGER · LIEF AMSTERDAM", "Crew en events.", "De belangrijkste acties en bezetting direct in beeld.")}${refreshButton()}</div>${managerOverviewActions()}<div class="crew-manager-actions">${[["staff", "Personeel inplannen"], ["event", "Nieuw event"], ["shift", "Shift toevoegen"], ["task", "Taak toevoegen"], ["document", "Document toevoegen"], ["announcement", "Nieuwe mededeling"]].map(([key, label]) => button(label, "manager-action", key, key === "staff" ? "primary" : "secondary")).join("")}</div>${managerQuickAction()}${managerSwaps()}<div class="crew-manager-stats">${stats.map(([value, label], index) => `<div class="${index === 4 ? "accent" : ""}"><strong>${value}</strong><span>${label}</span></div>`).join("")}</div><div class="crew-section-head" id="manager-events"><h2>Aankomende events</h2><button type="button" class="crew-small-button" data-action="new-event">${icon("plus", 16)} Nieuw event</button></div><div class="crew-manager-event-grid">${upcoming.length ? upcoming.map(eventCardManager).join("") : empty("Nog geen events", "Maak het eerste event aan om shifts te plannen.")}</div>${managerFeedback()}`, "manager");
 }
 function managerSwaps() {
   const items = [...(state.data.shift_swaps || [])].sort((a,b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0,20);
@@ -587,9 +604,18 @@ function managerSwaps() {
 function managerFeedback() {
   const items = [...(state.data.shift_feedback || [])].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 10);
   if (!items.length) return "";
-  return `<section class="crew-manager-feedback"><div class="crew-section-head"><h2>Recente feedback</h2><a href="#completed">Alle afgeronde shifts ${icon("arrow", 15)}</a></div><div class="crew-feedback-list">${items.map(item => `<div class="crew-feedback-row"><strong>${e(nameOf(item.user_id))} · ${e(eventOf(shiftOf(item.shift_id))?.title || "Event")}</strong><span>${hearts(ratingOf(item))}</span><p>${e(item.feedback_text ?? item.text ?? "") || "Geen geschreven feedback"}</p><time>${e(dateTimeText(item.created_at))}</time></div>`).join("")}</div></section>`;
+  return `<section class="crew-manager-feedback"><div class="crew-section-head"><h2>Recente feedback</h2><a href="#completed">Alle feedback ${icon("arrow", 15)}</a></div><div class="crew-feedback-list">${items.map(item => `<div class="crew-feedback-row"><strong>${e(nameOf(item.user_id))} · ${e(eventOf(shiftOf(item.shift_id))?.title || "Event")}</strong><span>${hearts(ratingOf(item))}</span><p>${e(item.feedback_text ?? item.text ?? "") || "Geen geschreven feedback"}</p><time>${e(dateTimeText(item.created_at))}</time></div>`).join("")}</div></section>`;
 }
 function completedShifts() { return orderedShifts().filter(isCompleted).reverse(); }
+function completedShiftsPage() {
+  const shifts = completedShifts();
+  return shell(`<a class="crew-back" href="#manager">${icon("back", 16)} Terug naar dashboard</a>${heading("MANAGER · UREN", "Afgeronde shifts", "Alle afgelopen diensten en hun gewerkte uren.")}<div class="crew-section-head"><h2>${shifts.length} afgeronde shifts</h2>${refreshButton()}</div>${shifts.length ? `<div class="crew-data-table crew-finished-table"><div class="crew-data-head"><span>Datum</span><span>Event · shift</span><span>Start</span><span>Eind</span><span>Medewerkers</span><span>Totaal uren</span></div>${shifts.map(shift => { const members = workedSignups(shift); return `<a class="crew-data-row" href="#completed-shifts/${e(shift.id)}"><span data-label="Datum">${e(dateText(shift.date, { day: "numeric", month: "short", year: "numeric" }))}</span><strong data-label="Event">${e(eventOf(shift)?.title || "Event")} <small>· ${e(shift.title)}</small></strong><span data-label="Start">${e(timeText(shift.start_time))}</span><span data-label="Eind">${e(timeText(shift.end_time))}</span><span data-label="Medewerkers">${members.length}</span><strong data-label="Totaal uren">${hoursText(members.reduce((sum, signup) => sum + workedMinutes(signup, shift), 0))}</strong></a>`; }).join("")}</div>` : empty("Nog geen afgeronde shifts", "Afgelopen shifts verschijnen hier vanzelf.")}`, "manager");
+}
+function completedShiftDetailPage(shift) {
+  const members = workedSignups(shift);
+  const total = members.reduce((sum, signup) => sum + workedMinutes(signup, shift), 0);
+  return shell(`<a class="crew-back" href="#completed-shifts">${icon("back", 16)} Terug naar afgeronde shifts</a>${heading("MANAGER · AFGERONDE SHIFT", eventOf(shift)?.title || shift.title, `${shift.title} · ${dateText(shift.date)} · ${shiftTime(shift)}`)}<div class="crew-section-head"><h2>Medewerkers</h2>${badge(`${members.length} gekoppeld`, "soft")}</div>${members.length ? `<div class="crew-data-table crew-finished-members-table"><div class="crew-data-head"><span>Naam</span><span>Rol</span><span>Start</span><span>Eind</span><span>Gewerkte uren</span></div>${members.map(signup => `<div class="crew-data-row"><strong data-label="Naam">${e(nameOf(signup.user_id))}</strong><span data-label="Rol">${e(signup.assigned_role || "Niet ingedeeld")}</span><span data-label="Start">${e(timeText(shift.start_time))}</span><span data-label="Eind">${e(timeText(shift.end_time))}</span><strong data-label="Gewerkte uren">${hoursText(workedMinutes(signup, shift))}</strong></div>`).join("")}</div>` : `<p class="crew-compact-empty">Geen aangemelde medewerkers voor deze shift.</p>`}<div class="crew-hours-total crew-hours-footer"><span>Totaal gewerkte uren</span><strong>${hoursText(total)}</strong></div>`, "manager");
+}
 function completedPage() {
   const shifts = completedShifts();
   return shell(`<a class="crew-back" href="#manager">${icon("back", 16)} Terug naar dashboard</a>${heading("MANAGER · OVERZICHT", "Feedback & afgeronde events", "Gewerkte uren en feedback per afgeronde shift.")}${refreshButton()}${shifts.length ? `<div class="crew-data-table crew-completed-table"><div class="crew-data-head"><span>Datum</span><span>Event · shift</span><span>Start</span><span>Eind</span><span>Medewerkers</span><span>Totaal uren</span><span>Gem. beoordeling</span></div>${shifts.map(shift => { const members = workedSignups(shift), ratings = (state.data.shift_feedback || []).filter(item => item.shift_id === shift.id).map(ratingOf).filter(Boolean); const average = ratings.length ? (ratings.reduce((sum, score) => sum + score, 0) / ratings.length).toFixed(1).replace(".", ",") + " / 5" : "—"; return `<a class="crew-data-row" href="#completed/${e(shift.id)}"><span data-label="Datum">${e(dateText(shift.date, { day: "numeric", month: "short", year: "numeric" }))}</span><strong data-label="Event">${e(eventOf(shift)?.title || "Event")} <small>· ${e(shift.title)}</small></strong><span data-label="Start">${e(timeText(shift.start_time))}</span><span data-label="Eind">${e(timeText(shift.end_time))}</span><span data-label="Medewerkers">${members.length}</span><span data-label="Totaal uren">${hoursText(members.reduce((sum, signup) => sum + workedMinutes(signup, shift), 0))}</span><strong data-label="Gem. beoordeling">${average}</strong></a>`; }).join("")}</div>` : empty("Nog geen afgeronde shifts", "Afgeronde diensten verschijnen hier automatisch.")}`, "manager");
@@ -635,10 +661,11 @@ function render() {
   else if (page === "notifications") root.innerHTML = notificationsPage();
   else if (page === "profile") root.innerHTML = profilePage();
   else if (page === "manager" && isManager()) root.innerHTML = managerPage();
+  else if (page === "completed-shifts") root.innerHTML = isManager() ? shift && isCompleted(shift) ? completedShiftDetailPage(shift) : completedShiftsPage() : shell(empty("Geen toegang", "Dit overzicht is alleen voor managers."), "home");
   else if (page === "completed" && isManager()) root.innerHTML = shift && isCompleted(shift) ? completedDetailPage(shift) : completedPage();
   else if (page === "manage" && event && isManager()) root.innerHTML = manageEventPage(event);
   else root.innerHTML = homePage();
-  document.title = `${page === "room" ? "Eventruimte" : page === "manager" ? "Manager" : page === "notifications" ? "Meldingen" : "Crew"} · LIEF Amsterdam`;
+  document.title = `${page === "room" ? "Eventruimte" : page === "manager" ? "Manager" : page === "completed-shifts" ? "Afgeronde shifts" : page === "notifications" ? "Meldingen" : "Crew"} · LIEF Amsterdam`;
   if (allowed && tab === "taken" && itemId) requestAnimationFrame(() => document.getElementById(`task-${itemId}`)?.scrollIntoView({ block: "center" }));
   state.toast = "";
   const roomId = allowed ? id : null;
@@ -1199,7 +1226,7 @@ document.addEventListener("visibilitychange", () => {
 });
 setInterval(() => {
   if (!state.user || document.visibilityState !== "visible") return;
-  if (!["shifts", "hours", "completed", "manager"].includes(currentRoute().page)) return;
+  if (!["shifts", "hours", "completed", "completed-shifts", "manager"].includes(currentRoute().page)) return;
   if (document.activeElement?.closest("form")) return;
   render();
 }, 60000);

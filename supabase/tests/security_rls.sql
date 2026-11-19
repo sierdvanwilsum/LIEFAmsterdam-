@@ -19,6 +19,7 @@ declare
   v_shift uuid := gen_random_uuid();
   v_draft_shift uuid := gen_random_uuid();
   v_past_shift uuid := gen_random_uuid();
+  v_past_other_shift uuid := gen_random_uuid();
   v_task uuid := gen_random_uuid();
   v_document uuid := gen_random_uuid();
   v_swap uuid := gen_random_uuid();
@@ -39,6 +40,7 @@ begin
   perform set_config('audit.shift', v_shift::text, true);
   perform set_config('audit.draft_shift', v_draft_shift::text, true);
   perform set_config('audit.past_shift', v_past_shift::text, true);
+  perform set_config('audit.past_other_shift', v_past_other_shift::text, true);
   perform set_config('audit.task', v_task::text, true);
   perform set_config('audit.document', v_document::text, true);
   perform set_config('audit.swap', v_swap::text, true);
@@ -65,7 +67,8 @@ begin
   values
     (v_shift, v_event, 'Published security fixture', current_date + 30, '09:00', '10:00', 99, true),
     (v_draft_shift, v_event, 'Draft security fixture', current_date + 31, '09:00', '10:00', 99, false),
-    (v_past_shift, v_event, 'Completed overnight fixture', current_date - 2, '17:00', '02:00', 2, true);
+    (v_past_shift, v_event, 'Completed overnight fixture', current_date - 2, '17:00', '02:00', 2, true),
+    (v_past_other_shift, v_event, 'Other completed fixture', current_date - 3, '09:00', '17:00', 1, true);
   insert into public.shift_roles (shift_id, name, required_count)
   values (v_past_shift, 'Bar', 1), (v_past_shift, 'Runner', 1);
   insert into public.shift_signups (shift_id, user_id, available)
@@ -152,6 +155,16 @@ begin
   insert into security_test_results values ('employee A sees published shift', '1 shift', v_count::text, v_count = 1, 'geen');
   select count(*) into v_count from public.shifts where id = current_setting('audit.draft_shift')::uuid;
   insert into security_test_results values ('employee A cannot see draft shift', '0 shifts', v_count::text, v_count = 0, 'geen');
+  select count(*) into v_count from public.shifts where id = current_setting('audit.past_shift')::uuid;
+  insert into security_test_results values ('employee A sees own completed shift', '1 shift', v_count::text, v_count = 1, 'geen');
+  select count(*) into v_count from public.shifts where id = current_setting('audit.past_other_shift')::uuid;
+  insert into security_test_results values ('employee A cannot list unrelated completed shift', '0 shifts', v_count::text, v_count = 0, 'geen');
+  select count(*) into v_count from public.shift_occupancy()
+    where shift_id = current_setting('audit.past_shift')::uuid;
+  insert into security_test_results values ('employee A cannot query archived crew totals', '0 totals', v_count::text, v_count = 0, 'geen');
+  select count(*) into v_count from public.shift_role_occupancy()
+    where shift_id = current_setting('audit.past_shift')::uuid;
+  insert into security_test_results values ('employee A cannot query archived role totals', '0 totals', v_count::text, v_count = 0, 'geen');
   select count(*) into v_count from public.tasks where id = current_setting('audit.task')::uuid;
   insert into security_test_results values ('employee A sees relevant task', '1 task', v_count::text, v_count = 1, 'geen');
   select count(*) into v_count from public.documents where id = current_setting('audit.document')::uuid;
@@ -253,6 +266,11 @@ begin
   end if;
   select count(*) into v_count from public.shifts where id = current_setting('audit.draft_shift')::uuid;
   insert into security_test_results values ('manager sees draft shift', '1 shift', v_count::text, v_count = 1, 'geen');
+  select count(*) into v_count from public.shifts where id = current_setting('audit.past_other_shift')::uuid;
+  insert into security_test_results values ('manager sees unrelated completed shift', '1 shift', v_count::text, v_count = 1, 'geen');
+  select count(*) into v_count from public.shift_occupancy()
+    where shift_id = current_setting('audit.past_shift')::uuid and signup_count = 2;
+  insert into security_test_results values ('manager sees archived crew totals', '1 total', v_count::text, v_count = 1, 'geen');
   select count(*) into v_count from public.shift_signups where shift_id = current_setting('audit.past_shift')::uuid;
   insert into security_test_results values ('manager sees all completed employees', '2 signups', v_count::text, v_count = 2, 'geen');
   select count(*) into v_count from public.shift_feedback where shift_id = current_setting('audit.past_shift')::uuid;

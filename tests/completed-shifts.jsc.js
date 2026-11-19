@@ -38,7 +38,8 @@ eval(source + `
     shift_feedback: [
       { shift_id: "night", user_id: "a", rating: 1, feedback_text: "Goed", created_at: "2020-12-12T04:00:00Z" },
       { shift_id: "night", user_id: "b", rating: 5, feedback_text: "Top", created_at: "2020-12-12T05:00:00Z" }
-    ], profiles: [{ id: "a", full_name: "Noor" }, { id: "b", full_name: "Daan" }]
+    ], profiles: [{ id: "a", full_name: "Noor" }, { id: "b", full_name: "Daan" }],
+    tasks: [], occupancy: [], role_occupancy: [], shift_roles: []
   };
   const ownHours = myHoursPage();
   check("Mijn uren toont eigen afgeronde diensten", ownHours.includes("17:00–02:00") && ownHours.includes("17 uur"));
@@ -56,12 +57,25 @@ eval(source + `
   check("hartjes 1 t/m 4 rood", ratingInput.value === "4" && controls.slice(0, 4).every(control => control.classList.active) && !controls[4].classList.active);
   state.data.shift_feedback[0].rating = 1;
   state.profile.role = "manager";
+  check("manager heeft aparte knop Afgeronde shifts", managerPage().includes('data-id="completed-shifts"'));
+  const finishedOverview = completedShiftsPage();
+  check("manager ziet alle oude shifts", finishedOverview.includes("#completed-shifts/day") && finishedOverview.includes("#completed-shifts/night") && !finishedOverview.includes("#completed-shifts/future"));
+  const finishedDetail = completedShiftDetailPage(nightShift);
+  check("manager ziet gekoppelde medewerkers en uren", finishedDetail.includes("Noor") && finishedDetail.includes("Daan") && finishedDetail.includes("18 uur"));
+  check("nachtshift toont 9 uur per medewerker", (finishedDetail.match(/9 uur/g) || []).length === 2);
   const overview = completedPage();
   check("manager ziet gemiddeld 3 hartjes", overview.includes("3,0 / 5"));
   const detail = completedDetailPage(nightShift);
   check("manager ziet beide medewerkers en 18 uur", detail.includes("Noor") && detail.includes("Daan") && detail.includes("18 uur"));
   check("manager ziet medewerker zonder toegewezen rol", completedDetailPage(dayShift).includes("Niet ingedeeld"));
   check("manager ziet feedback bij juiste shift", detail.includes("Goed") && detail.includes("Top"));
+  state.profile.role = "employee";
+  location.hash = "#completed-shifts/night";
+  render();
+  check("medewerker krijgt geen toegang tot managerdetail", rootNode.innerHTML.includes("Geen toegang") && !rootNode.innerHTML.includes("Daan"));
+  location.hash = "#completed-shifts";
+  render();
+  check("medewerker krijgt geen toegang tot manageroverzicht", rootNode.innerHTML.includes("Geen toegang") && !rootNode.innerHTML.includes("Willy Wonka"));
   async function testPersistence() {
     state.profile.role = "employee";
     state.data.shift_feedback = state.data.shift_feedback.filter(item => item.user_id !== "a");
@@ -75,6 +89,9 @@ eval(source + `
     form.values = { rating: "5", feedback_text: "Aangepaste reactie" };
     submitHandler(event);
     check("feedback wordt aangepast zonder duplicaat", state.data.shift_feedback.filter(item => item.user_id === "a").length === 1 && state.data.shift_feedback.find(item => item.user_id === "a").rating === 5);
+    const archive = [{ id: "a" }, { id: "b" }, { id: "c" }];
+    const client = { from() { return { select() { return { order() { return { range(start, end) { return Promise.resolve({ data: archive.slice(start, Math.min(end + 1, start + 2)), count: archive.length }); } }; } }; } }; } };
+    check("manager haalt ook volgende Supabase-pagina op", (await loadAllRows("shifts", "*", client)).data.length === 3);
   }
   testPersistence().catch(error => { print(error); throw error; });
 `);
